@@ -89,6 +89,16 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// ControlDBPath 返回控制库文件路径（DataDir 下单文件）。
+func (c Config) ControlDBPath() string {
+	return filepath.Join(c.DataDir, "control.db")
+}
+
+// SecretsDir 返回秘密文件目录（预留；当前秘密全部在控制库内）。
+func (c Config) SecretsDir() string {
+	return filepath.Join(c.DataDir, "secrets")
+}
+
 func envDefault(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value

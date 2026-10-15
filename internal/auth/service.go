@@ -11,6 +11,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
@@ -703,6 +704,13 @@ func mustID() string {
 		return "evt_" + strconv.FormatInt(time.Now().UnixNano(), 16)
 	}
 	return id
+}
+
+// CSRFTokenFor 从会话 ID 派生 CSRF token。会话 Cookie 是 HttpOnly 的，
+// 派生值只经登录响应下发一次，跨站脚本之外的伪造成本等于重算会话 ID。
+func CSRFTokenFor(sessionID string) string {
+	sum := sha256.Sum256([]byte("csrf:" + sessionID))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // ---- 小工具 ----
