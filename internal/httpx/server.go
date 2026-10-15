@@ -29,15 +29,21 @@ const (
 
 // Server 是 HTTP 层的依赖容器。
 type Server struct {
-	auth   *auth.Service
-	nodes  *nodes.Store
-	hub    *bridge.Hub
-	public string // PublicURL，用于给用户展示 MCP endpoint
-	mux    *http.ServeMux
+	auth    *auth.Service
+	nodes   *nodes.Store
+	hub     *bridge.Hub
+	gateway MCPGateway
+	public  string // PublicURL，用于给用户展示 MCP endpoint
+	mux     *http.ServeMux
 }
 
-func NewServer(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, publicURL string) *Server {
-	s := &Server{auth: authService, nodes: nodeStore, hub: hub, public: publicURL, mux: http.NewServeMux()}
+// MCPGateway 是 /mcp 挂载所需的最小网关接口（避免 httpx 反向依赖 mcpgw）。
+type MCPGateway interface {
+	Handler() http.Handler
+}
+
+func NewServer(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, gateway MCPGateway, publicURL string) *Server {
+	s := &Server{auth: authService, nodes: nodeStore, hub: hub, gateway: gateway, public: publicURL, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -74,6 +80,11 @@ func (s *Server) routes() {
 	// 节点侧（AgentDock 出站，无会话，配对码/device token 认证）
 	s.mux.HandleFunc("POST "+protocol.PairPath, s.handleNodePair)
 	s.mux.HandleFunc("GET "+protocol.ConnectPath, s.handleNodeConnect)
+
+	// 平台侧 MCP（Bearer MCP Token 即身份，网关内部完成认证与限流）
+	if s.gateway != nil {
+		s.mux.Handle("/mcp", s.gateway.Handler())
+	}
 }
 
 // ---- 认证辅助 ----

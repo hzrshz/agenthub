@@ -36,7 +36,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	svc := auth.NewService(db)
 	nodeStore := nodes.NewStore(db)
 	hub := bridge.NewHub(nodeStore)
-	server := NewServer(svc, nodeStore, hub, "https://hub.example.com")
+	server := NewServer(svc, nodeStore, hub, nil, "https://hub.example.com")
 	ts := httptest.NewServer(server.Handler())
 	t.Cleanup(ts.Close)
 	return &testEnv{svc: svc, ts: ts}
