@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/uvwt/agenthub/internal/auth"
+	"github.com/uvwt/agenthub/internal/bridge"
 	"github.com/uvwt/agenthub/internal/core"
+	"github.com/uvwt/agenthub/internal/nodes"
 )
 
 const strongPassword = "correct-horse-battery"
@@ -32,7 +34,9 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	svc := auth.NewService(db)
-	server := NewServer(svc, "https://hub.example.com")
+	nodeStore := nodes.NewStore(db)
+	hub := bridge.NewHub(nodeStore)
+	server := NewServer(svc, nodeStore, hub, "https://hub.example.com")
 	ts := httptest.NewServer(server.Handler())
 	t.Cleanup(ts.Close)
 	return &testEnv{svc: svc, ts: ts}

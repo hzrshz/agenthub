@@ -15,7 +15,10 @@ import (
 	"time"
 
 	"github.com/uvwt/agenthub/internal/auth"
+	"github.com/uvwt/agenthub/internal/bridge"
 	"github.com/uvwt/agenthub/internal/core"
+	"github.com/uvwt/agenthub/internal/nodes"
+	protocol "github.com/uvwt/agentdock-protocol"
 )
 
 const (
@@ -27,12 +30,14 @@ const (
 // Server 是 HTTP 层的依赖容器。
 type Server struct {
 	auth   *auth.Service
+	nodes  *nodes.Store
+	hub    *bridge.Hub
 	public string // PublicURL，用于给用户展示 MCP endpoint
 	mux    *http.ServeMux
 }
 
-func NewServer(authService *auth.Service, publicURL string) *Server {
-	s := &Server{auth: authService, public: publicURL, mux: http.NewServeMux()}
+func NewServer(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, publicURL string) *Server {
+	s := &Server{auth: authService, nodes: nodeStore, hub: hub, public: publicURL, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -58,6 +63,17 @@ func (s *Server) routes() {
 	// 用户：MCP Token
 	s.mux.HandleFunc("GET /v1/mcp-token", s.requireSession(s.handleGetMCPToken))
 	s.mux.HandleFunc("POST /v1/mcp-token/reset", s.requireSession(s.handleResetMCPToken))
+
+	// 用户：节点管理
+	s.mux.HandleFunc("GET /v1/nodes", s.requireSession(s.handleListNodes))
+	s.mux.HandleFunc("POST /v1/nodes/pairing-codes", s.requireSession(s.handleCreatePairingCode))
+	s.mux.HandleFunc("POST /v1/nodes/{id}/disable", s.requireSession(s.handleDisableNode))
+	s.mux.HandleFunc("POST /v1/nodes/{id}/enable", s.requireSession(s.handleEnableNode))
+	s.mux.HandleFunc("DELETE /v1/nodes/{id}", s.requireSession(s.handleDeleteNode))
+
+	// 节点侧（AgentDock 出站，无会话，配对码/device token 认证）
+	s.mux.HandleFunc("POST "+protocol.PairPath, s.handleNodePair)
+	s.mux.HandleFunc("GET "+protocol.ConnectPath, s.handleNodeConnect)
 }
 
 // ---- 认证辅助 ----

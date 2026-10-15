@@ -3,6 +3,8 @@ module github.com/uvwt/agenthub
 go 1.26.3
 
 require (
+	github.com/gorilla/websocket v1.5.3
+	github.com/uvwt/agentdock-protocol v0.8.2-0.20260929123659-6131ae03b178
 	golang.org/x/crypto v0.58.0
 	golang.org/x/term v0.47.0
 	modernc.org/sqlite v1.39.1
