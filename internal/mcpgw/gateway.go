@@ -35,6 +35,7 @@ type Gateway struct {
 	nodeSvc *nodes.Store
 	hub     *bridge.Hub
 	fleet   *fleet.Bridge
+	invokes InvokeRecorder
 	logger  *slog.Logger
 
 	// rateMu 保护每用户 MCP 调用速率窗口。
@@ -51,9 +52,22 @@ type rateWindow struct {
 	count       int
 }
 
-func NewGateway(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, fleetBridge *fleet.Bridge, logger *slog.Logger) *Gateway {
+// InvokeRecorder 是调用记录写入的最小接口（audit.Store 实现；测试可注入空实现）。
+type InvokeRecorder interface {
+	RecordInvoke(ctx context.Context, userID, nodeID, toolName, outcome string, duration time.Duration, errorCode string) error
+}
+
+// Outcome 常量与 audit 包对齐。
+const (
+	OutcomeSuccess   = "success"
+	OutcomeError     = "error"
+	OutcomeTimeout   = "timeout"
+	OutcomeCancelled = "cancelled"
+)
+
+func NewGateway(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, fleetBridge *fleet.Bridge, invokes InvokeRecorder, logger *slog.Logger) *Gateway {
 	g := &Gateway{
-		auth: authService, nodeSvc: nodeStore, hub: hub, fleet: fleetBridge, logger: logger,
+		auth: authService, nodeSvc: nodeStore, hub: hub, fleet: fleetBridge, invokes: invokes, logger: logger,
 		rateWindows: make(map[string]*rateWindow), inflight: make(map[string]int),
 	}
 	return g
@@ -289,7 +303,33 @@ func (g *Gateway) callNodeTool(ctx context.Context, userID, toolName string, arg
 	invokeCtx, cancel := context.WithTimeout(ctx, config.InvokeTimeout)
 	defer cancel()
 	invokeCtx = bridge.WithTraceparent(invokeCtx, traceparentOf(ctx))
-	return g.hub.Invoke(invokeCtx, nodeID, protocol.OperationToolCall, map[string]any{"tool": toolName, "arguments": arguments})
+	started := time.Now()
+	result, err := g.hub.Invoke(invokeCtx, nodeID, protocol.OperationToolCall, map[string]any{"tool": toolName, "arguments": arguments})
+	if g.invokes != nil {
+		g.recordInvoke(ctx, userID, nodeID, toolName, time.Since(started), err)
+	}
+	return result, err
+}
+
+// recordInvoke 把调用结果按类别写入记录（只含元数据）。
+func (g *Gateway) recordInvoke(ctx context.Context, userID, nodeID, toolName string, duration time.Duration, err error) {
+	outcome := OutcomeSuccess
+	errorCode := ""
+	if err != nil {
+		outcome = OutcomeError
+		errorCode = string(core.ErrorCodeOf(err))
+		if errors.Is(err, context.DeadlineExceeded) {
+			outcome = OutcomeTimeout
+		} else if errors.Is(err, context.Canceled) {
+			outcome = OutcomeCancelled
+		}
+	}
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	// 记录失败不阻断调用结果，只打日志。
+	if recordErr := g.invokes.RecordInvoke(recordCtx, userID, nodeID, toolName, outcome, duration, errorCode); recordErr != nil && g.logger != nil {
+		g.logger.Warn("写入调用记录失败", "user", userID, "node", nodeID, "tool", toolName, "error", recordErr)
+	}
 }
 
 // nodesContextHandler 返回用户节点清单。

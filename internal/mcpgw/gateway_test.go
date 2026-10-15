@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"strings"
 	"testing"
 	"time"
@@ -21,11 +22,28 @@ import (
 	"github.com/uvwt/agenthub/internal/nodes"
 )
 
+type capturedInvoke struct {
+	userID, nodeID, toolName, outcome string
+}
+
+type captureRecorder struct {
+	mu      sync.Mutex
+	records []capturedInvoke
+}
+
+func (c *captureRecorder) RecordInvoke(_ context.Context, userID, nodeID, toolName, outcome string, _ time.Duration, _ string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.records = append(c.records, capturedInvoke{userID, nodeID, toolName, outcome})
+	return nil
+}
+
 type gwEnv struct {
 	svc       *auth.Service
 	nodes     *nodes.Store
 	hub       *bridge.Hub
 	gateway   *Gateway
+	invokes   *captureRecorder
 	ts        *httptest.Server
 	userToken string // 用户的 MCP token（明文）
 }
@@ -54,7 +72,8 @@ func newGatewayEnv(t *testing.T) *gwEnv {
 	fleetStore := fleet.NewStore(db)
 	fleetBridge := fleet.NewBridge(fleetStore, nodeStore, nil)
 	hub.SetHelloHandler(fleetBridge.ObserveNodeHello)
-	gateway := NewGateway(authSvc, nodeStore, hub, fleetBridge, nil)
+	invokes := &captureRecorder{records: make([]capturedInvoke, 0)}
+	gateway := NewGateway(authSvc, nodeStore, hub, fleetBridge, invokes, nil)
 
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", gateway.Handler())
@@ -81,7 +100,7 @@ func newGatewayEnv(t *testing.T) *gwEnv {
 		ts.Close()
 		_ = db.Close()
 	})
-	return &gwEnv{svc: authSvc, nodes: nodeStore, hub: hub, gateway: gateway, ts: ts, userToken: tokenAlice}
+	return &gwEnv{svc: authSvc, nodes: nodeStore, hub: hub, gateway: gateway, ts: ts, userToken: tokenAlice, invokes: invokes}
 }
 
 // connectToolNode 模拟 AgentDock：配对、连接、声明一个 echo 工具并应答。
@@ -310,4 +329,40 @@ func waitForPublish(t *testing.T, env *gwEnv, owner, tool string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("fleet contract %s/%s not published within 5s", owner, tool)
+}
+
+// 调用记录：成功的 echo 调用必须留一条元数据记录（不含参数）。
+func TestInvokeRecorded(t *testing.T) {
+	env := newGatewayEnv(t)
+	nodeConn := env.connectToolNode(t, "usr_alice", "device-alice-01", false)
+	defer nodeConn.Close()
+	waitForPublish(t, env, "usr_alice", "echo")
+
+	session := connectSession(t, env.ts.URL+"/mcp", env.userToken)
+	ctx := context.Background()
+	nodeList, _ := env.nodes.ListByOwner(ctx, "usr_alice")
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "echo", Arguments: map[string]any{"node_id": nodeList[0].ID, "message": "secret-value"},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("echo call: %v isError=%v", err, result.IsError)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		env.invokes.mu.Lock()
+		count := len(env.invokes.records)
+		env.invokes.mu.Unlock()
+		if count > 0 {
+			env.invokes.mu.Lock()
+			record := env.invokes.records[0]
+			env.invokes.mu.Unlock()
+			if record.userID != "usr_alice" || record.toolName != "echo" || record.outcome != OutcomeSuccess {
+				t.Fatalf("unexpected record: %+v", record)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("invoke record not written within 3s")
 }

@@ -3,12 +3,14 @@ package httpx
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
+	"github.com/uvwt/agenthub/internal/audit"
 	"github.com/uvwt/agenthub/internal/auth"
 	"github.com/uvwt/agenthub/internal/bridge"
 	"github.com/uvwt/agenthub/internal/core"
@@ -18,8 +20,10 @@ import (
 const strongPassword = "correct-horse-battery"
 
 type testEnv struct {
-	svc *auth.Service
-	ts  *httptest.Server
+	svc     *auth.Service
+	ts      *httptest.Server
+	db      *sql.DB
+	invokes *audit.Store
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -36,10 +40,11 @@ func newTestEnv(t *testing.T) *testEnv {
 	svc := auth.NewService(db)
 	nodeStore := nodes.NewStore(db)
 	hub := bridge.NewHub(nodeStore)
-	server := NewServer(svc, nodeStore, hub, nil, "https://hub.example.com")
+	invokes := audit.NewStore(db)
+	server := NewServer(svc, nodeStore, hub, nil, invokes, "https://hub.example.com")
 	ts := httptest.NewServer(server.Handler())
 	t.Cleanup(ts.Close)
-	return &testEnv{svc: svc, ts: ts}
+	return &testEnv{svc: svc, ts: ts, db: db, invokes: invokes}
 }
 
 // do 发起 JSON 请求；sessionToken/CSRF 非空时带上凭证头。

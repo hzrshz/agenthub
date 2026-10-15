@@ -1,0 +1,64 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #f5f6f8; color: #1a1a1a; }
+
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  background: #fff; border-bottom: 1px solid #e3e5e8;
+  padding: 0 24px; height: 52px;
+}
+.brand { font-weight: 700; font-size: 16px; }
+.topbar nav { display: flex; gap: 4px; flex: 1; }
+.topbar nav button {
+  border: none; background: none; padding: 8px 12px; cursor: pointer;
+  border-radius: 6px; color: #444;
+}
+.topbar nav button.active { background: #eef2ff; color: #2447d8; font-weight: 600; }
+.whoami { display: flex; gap: 8px; align-items: center; color: #666; }
+
+main { max-width: 1080px; margin: 24px auto; padding: 0 16px; }
+
+.card {
+  background: #fff; border: 1px solid #e3e5e8; border-radius: 10px;
+  padding: 20px; margin-bottom: 20px;
+}
+.card.narrow { max-width: 360px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 0 0 12px; }
+.muted { color: #888; }
+
+input, button {
+  font: inherit; padding: 8px 12px; border-radius: 6px;
+  border: 1px solid #d4d7dc; outline: none;
+}
+button { cursor: pointer; background: #f0f2f5; border: none; }
+button:hover { background: #e5e8ec; }
+button.danger { color: #c02b2b; }
+.error { color: #c02b2b; }
+code { background: #f0f2f5; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+
+table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eef0f2; }
+th { color: #666; font-weight: 500; font-size: 13px; }
+
+.online { color: #188038; font-weight: 600; }
+.offline { color: #999; }
+.disabled { color: #b06000; }
+.outcome-success { color: #188038; }
+.outcome-error { color: #c02b2b; }
+.outcome-timeout { color: #b06000; }
+.outcome-cancelled { color: #888; }
+
+.login-wrap { display: flex; justify-content: center; padding-top: 12vh; }
+.login-wrap input, .card input { display: block; width: 100%; margin-bottom: 10px; }
+.card button { margin-top: 4px; }
+.create-row { display: flex; gap: 8px; }
+.create-row input { width: 240px; margin-bottom: 0; }
+
+.token-result { background: #fffbe8; border: 1px solid #f0e0a0; border-radius: 8px; padding: 12px; margin-top: 12px; word-break: break-all; }
+.pairing-result { background: #eef6ff; border: 1px solid #c4dcf7; border-radius: 8px; padding: 12px; margin-top: 12px; }
+.loading { padding: 40px; text-align: center; color: #888; }

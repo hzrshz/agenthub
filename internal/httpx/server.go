@@ -16,6 +16,7 @@ import (
 
 	protocol "github.com/uvwt/agentdock-protocol"
 	"github.com/uvwt/agenthub/internal/auth"
+	"github.com/uvwt/agenthub/internal/audit"
 	"github.com/uvwt/agenthub/internal/bridge"
 	"github.com/uvwt/agenthub/internal/core"
 	"github.com/uvwt/agenthub/internal/nodes"
@@ -33,6 +34,7 @@ type Server struct {
 	nodes   *nodes.Store
 	hub     *bridge.Hub
 	gateway MCPGateway
+	invokes InvokeLister
 	public  string // PublicURL，用于给用户展示 MCP endpoint
 	mux     *http.ServeMux
 }
@@ -42,8 +44,15 @@ type MCPGateway interface {
 	Handler() http.Handler
 }
 
-func NewServer(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, gateway MCPGateway, publicURL string) *Server {
-	s := &Server{auth: authService, nodes: nodeStore, hub: hub, gateway: gateway, public: publicURL, mux: http.NewServeMux()}
+// InvokeLister 是调用记录查询的最小接口。
+type InvokeLister interface {
+	ListByUser(ctx context.Context, userID string, limit int, before *time.Time) ([]audit.InvokeLog, error)
+	ListAll(ctx context.Context, limit int, before *time.Time) ([]audit.InvokeLog, error)
+	StatsSince(ctx context.Context, since time.Time) ([]audit.UserStats, error)
+}
+
+func NewServer(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, gateway MCPGateway, invokes InvokeLister, publicURL string) *Server {
+	s := &Server{auth: authService, nodes: nodeStore, hub: hub, gateway: gateway, invokes: invokes, public: publicURL, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -65,10 +74,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/admin/users/{id}/disable", s.requireAdmin(s.handleDisableUser))
 	s.mux.HandleFunc("POST /v1/admin/users/{id}/enable", s.requireAdmin(s.handleEnableUser))
 	s.mux.HandleFunc("POST /v1/admin/users/{id}/reset-password", s.requireAdmin(s.handleResetPassword))
+	s.mux.HandleFunc("GET /v1/admin/invokes", s.requireAdmin(s.handleAdminInvokes))
+	s.mux.HandleFunc("GET /v1/admin/stats", s.requireAdmin(s.handleAdminStats))
 
 	// 用户：MCP Token
 	s.mux.HandleFunc("GET /v1/mcp-token", s.requireSession(s.handleGetMCPToken))
 	s.mux.HandleFunc("POST /v1/mcp-token/reset", s.requireSession(s.handleResetMCPToken))
+
+	// 用户：调用记录
+	s.mux.HandleFunc("GET /v1/invokes", s.requireSession(s.handleListInvokes))
 
 	// 用户：节点管理
 	s.mux.HandleFunc("GET /v1/nodes", s.requireSession(s.handleListNodes))
@@ -85,6 +99,9 @@ func (s *Server) routes() {
 	if s.gateway != nil {
 		s.mux.Handle("/mcp", s.gateway.Handler())
 	}
+
+	// Web 界面（构建产物嵌入；API 路由优先）。
+	s.mux.Handle("/", webHandler())
 }
 
 // ---- 认证辅助 ----
