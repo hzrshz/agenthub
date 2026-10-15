@@ -15,8 +15,8 @@ import (
 	"time"
 
 	protocol "github.com/uvwt/agentdock-protocol"
-	"github.com/uvwt/agenthub/internal/auth"
 	"github.com/uvwt/agenthub/internal/audit"
+	"github.com/uvwt/agenthub/internal/auth"
 	"github.com/uvwt/agenthub/internal/bridge"
 	"github.com/uvwt/agenthub/internal/core"
 	"github.com/uvwt/agenthub/internal/nodes"

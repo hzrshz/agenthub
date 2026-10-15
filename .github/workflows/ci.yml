@@ -1,0 +1,46 @@
+# 常规 CI：测试 + vet + 前端类型检查；额外做一次 loong64 编译冒烟，
+# 保证国产化目标不被日常提交破坏。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Build web bundle
+        run: make web
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Vet
+        run: go vet ./...
+
+      # 国产化守门：CGO_ENABLED=0 交叉编译 loong64 必须保持可行。
+      - name: Cross-compile smoke (loong64, static)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: loong64
+        run: |
+          go build -trimpath -ldflags "-s -w" -o /tmp/agenthub-loong64 ./cmd/agenthub
+          if readelf -l /tmp/agenthub-loong64 | grep -q "INTERP"; then
+            echo "ERROR: binary is dynamically linked"; exit 1
+          fi

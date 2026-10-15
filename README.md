@@ -53,6 +53,25 @@ make check  # 常规验证：go 测试 + 前端类型检查
 
 单二进制构建：`go build -o agenthub ./cmd/agenthub`（Web 界面已 `go:embed` 进二进制）。
 
+### 国产化环境（静态编译）
+
+全依赖为纯 Go 实现（SQLite 用 `modernc.org/sqlite`，无 CGO），产物为**完全静态链接**的单二进制，`ldd` 显示 `not a dynamic executable`，可直接复制到目标机运行——无需安装任何运行时或共享库。
+
+支持目标（`make release-linux` 本地构建，或推 `v*` tag 走 GitHub Actions 自动发布）：
+
+| GOOS/GOARCH | 覆盖环境 |
+|---|---|
+| `linux/amd64` | x86_64（海光、兆芯等） |
+| `linux/arm64` | 鲲鹏、飞腾（Phytium）等 ARM64 |
+| `linux/loong64` | 龙芯 3A5000/3A6000（LoongArch） |
+| `linux/riscv64` | RISC-V 生态 |
+
+```bash
+make release-linux   # 产出 dist/agenthub-linux-<arch> + checksums.txt
+```
+
+GitHub Actions：`ci.yml` 在每次推送时做测试 + vet + loong64 静态编译冒烟（守门，防止日常提交破坏国产化目标）；`release.yml` 在打 `v*` tag 时构建全部目标、校验静态链接、自动创建 Release 并附 sha256 校验和。
+
 ## 安全模型（摘要）
 
 - 三类秘密（Web session / 每用户 MCP Token / 每节点 Device Token）全部只存 SHA-256 哈希；口令 argon2id。

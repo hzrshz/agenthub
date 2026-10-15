@@ -1,0 +1,93 @@
+# 静态编译打包：CGO_ENABLED=0 + 纯 Go 依赖（modernc.org/sqlite），
+# 产物为完全静态链接的单二进制，可直接部署到国产化 Linux 环境
+# （鲲鹏/飞腾 arm64、龙芯 loong64、申威生态 riscv64、x86_64）。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: loong64
+          - goos: linux
+            goarch: riscv64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # Web 界面 go:embed 进二进制，必须在 go build 之前构建产物。
+      - name: Build web bundle
+        run: make web
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Build static binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "dist/agenthub-${GOOS}-${GOARCH}" ./cmd/agenthub
+
+      - name: Verify static linkage
+        run: |
+          file "dist/agenthub-${{ matrix.goos }}-${{ matrix.goarch }}"
+          # 静态链接校验：不允许出现 interpreter（动态链接器）。
+          if readelf -l "dist/agenthub-${{ matrix.goos }}-${{ matrix.goarch }}" | grep -q "INTERP"; then
+            echo "ERROR: binary is dynamically linked"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agenthub-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist/
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum agenthub-* > checksums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/agenthub-*
+            dist/checksums.txt
+          generate_release_notes: true
