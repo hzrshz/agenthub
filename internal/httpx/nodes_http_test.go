@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -69,6 +70,15 @@ func TestNodePairingLifecycle(t *testing.T) {
 		},
 	}); err != nil {
 		t.Fatalf("hello: %v", err)
+	}
+	// 等待 node.ready 确认握手完成（Online 判定以 ready 为准）。
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var readyMsg map[string]any
+	if err := conn.ReadJSON(&readyMsg); err != nil {
+		t.Fatalf("read ready: %v", err)
+	}
+	if readyMsg["type"] != "node.ready" {
+		t.Fatalf("expected node.ready, got %v", readyMsg)
 	}
 
 	// 用户节点列表必须显示在线。
