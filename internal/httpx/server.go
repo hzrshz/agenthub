@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
+	protocol "github.com/uvwt/agentdock-protocol"
 	"github.com/uvwt/agenthub/internal/auth"
 	"github.com/uvwt/agenthub/internal/bridge"
 	"github.com/uvwt/agenthub/internal/core"
 	"github.com/uvwt/agenthub/internal/nodes"
-	protocol "github.com/uvwt/agentdock-protocol"
 )
 
 const (
@@ -264,8 +264,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		// TLS 由反代终结；X-Forwarded-Proto 存在时浏览器侧必为 https。
-		Secure:   true,
-		Expires:  issued.Session.AbsoluteExpiresAt,
+		Secure:  true,
+		Expires: issued.Session.AbsoluteExpiresAt,
 	})
 	writeJSON(w, http.StatusOK, loginResponse{
 		SessionID:          issued.Session.ID,
