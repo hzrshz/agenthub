@@ -4,6 +4,7 @@ import { Invokes } from "./Invokes";
 
 interface UserStats {
   user_id: string;
+  username: string;
   recent_calls: number;
 }
 
@@ -35,7 +36,7 @@ export function AdminOverview() {
           <tbody>
             {stats.map((stat) => (
               <tr key={stat.user_id}>
-                <td><code>{stat.user_id.slice(0, 20)}…</code></td>
+                <td>{stat.username || <code>{stat.user_id.slice(0, 20)}…</code>}</td>
                 <td>{stat.recent_calls}</td>
               </tr>
             ))}

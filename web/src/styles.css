@@ -62,3 +62,19 @@ th { color: #666; font-weight: 500; font-size: 13px; }
 .token-result { background: #fffbe8; border: 1px solid #f0e0a0; border-radius: 8px; padding: 12px; margin-top: 12px; word-break: break-all; }
 .pairing-result { background: #eef6ff; border: 1px solid #c4dcf7; border-radius: 8px; padding: 12px; margin-top: 12px; }
 .loading { padding: 40px; text-align: center; color: #888; }
+
+/* 分页条 */
+.pagination { display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+.pagination .pager { display: flex; gap: 4px; }
+.pagination .pager button { min-width: 32px; padding: 4px 8px; }
+.pagination .pager button.active { background: #2447d8; color: #fff; }
+.pagination .pager button:disabled { opacity: 0.4; cursor: default; }
+.pagination .ellipsis { padding: 4px 2px; color: #999; }
+.pagination .jump { display: flex; align-items: center; gap: 6px; color: #666; }
+.pagination .jump input { width: 60px; margin: 0; }
+.pagination select { padding: 4px 8px; }
+
+/* 筛选行 */
+.filter-row { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.filter-row form { display: flex; gap: 8px; }
+.filter-row input { width: 220px; margin: 0; }

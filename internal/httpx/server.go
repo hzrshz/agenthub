@@ -46,8 +46,8 @@ type MCPGateway interface {
 
 // InvokeLister 是调用记录查询的最小接口。
 type InvokeLister interface {
-	ListByUser(ctx context.Context, userID string, limit int, before *time.Time) ([]audit.InvokeLog, error)
-	ListAll(ctx context.Context, limit int, before *time.Time) ([]audit.InvokeLog, error)
+	ListByUser(ctx context.Context, query audit.InvokeQuery) (audit.InvokePage, error)
+	ListAll(ctx context.Context, query audit.InvokeQuery) (audit.InvokePage, error)
 	StatsSince(ctx context.Context, since time.Time) ([]audit.UserStats, error)
 }
 
