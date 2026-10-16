@@ -1,6 +1,7 @@
 # 静态编译打包：CGO_ENABLED=0 + 纯 Go 依赖（modernc.org/sqlite），
 # 产物为完全静态链接的单二进制，可直接部署到国产化 Linux 环境
-# （鲲鹏/飞腾 arm64、龙芯 loong64、申威生态 riscv64、x86_64）。
+# （鲲鹏/飞腾 arm64、龙芯 loong64、RISC-V、x86_64）。
+# 同时构建多架构容器镜像并推送到 GHCR（不推 Docker Hub）。
 name: release
 
 on:
@@ -11,9 +12,14 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build:
+  binaries:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -70,8 +76,53 @@ jobs:
           name: agenthub-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
 
+  # 多架构容器镜像：amd64/arm64 由原生 runner + QEMU 覆盖 loong64/riscv64。
+  # go-sdk/modernc 全部纯 Go，QEMU 下 go build 慢但可行；web 产物单次构建复用。
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,loong64,riscv64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # tag 推送 → v1.2.3 / 1.2 / latest；手动触发 → sha 短哈希。
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,prefix=sha-,enable=${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/loong64,linux/riscv64
+          push: true
+          build-args: |
+            VERSION=${{ startsWith(github.ref, 'refs/tags/v') && format('{0}', github.ref_name) || 'dev' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
-    needs: build
+    needs: binaries
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

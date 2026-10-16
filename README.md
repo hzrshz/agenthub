@@ -44,6 +44,28 @@ HUB_DATA_DIR=/var/lib/agenthub HUB_PUBLIC_URL=https://hub.example.com \
 
 停机复制 `HUB_DATA_DIR/control.db` 单文件即可，不做在线备份。
 
+## Docker 部署
+
+镜像发布到 GHCR（不推 Docker Hub），多架构覆盖 amd64/arm64/loong64/riscv64，运行层为 distroless static（无 shell，非 root）：
+
+```bash
+# tag 推送后自动构建；拉取（把 OWNER 换成你的 GitHub 用户/组织名，小写）
+docker pull ghcr.io/<owner>/agenthub:latest
+
+# 首次初始化管理员（挂载数据卷，容器内执行）
+docker run --rm -it -v agenthub-data:/data \
+  -e HUB_PUBLIC_URL=https://hub.example.com \
+  ghcr.io/<owner>/agenthub:latest admin init
+
+# 启动服务（容器内默认 HUB_LISTEN=0.0.0.0:8787，HUB_DATA_DIR=/data）
+docker run -d --name agenthub -p 8787:8787 \
+  -v agenthub-data:/data \
+  -e HUB_PUBLIC_URL=https://hub.example.com \
+  ghcr.io/<owner>/agenthub:latest serve
+```
+
+本地构建镜像：`docker build -t agenthub .`（多阶段：node 构建前端 → golang 静态编译 → distroless 运行层）。
+
 ## 构建
 
 ```bash

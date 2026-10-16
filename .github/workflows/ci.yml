@@ -44,3 +44,7 @@ jobs:
           if readelf -l /tmp/agenthub-loong64 | grep -q "INTERP"; then
             echo "ERROR: binary is dynamically linked"; exit 1
           fi
+
+      # 容器构建冒烟：Dockerfile 保持可构建（不推送）。
+      - name: Docker build smoke
+        run: docker build -t agenthub:ci-smoke .

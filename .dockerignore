@@ -1,0 +1,17 @@
+# 构建上下文瘦身：依赖由包管理器拉取，本地缓存与产物不进镜像层。
+.git
+.github
+dist/
+web/node_modules/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.test
+*.out
+agenthub
+agenthub-linux-*
+Dockerfile
+.dockerignore
+README.md
+docs/
