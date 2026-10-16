@@ -29,11 +29,14 @@ func (s *Server) handleListInvokes(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminInvokes 返回全局调用流水（仅元数据 + 关联用户名，管理员可见）。
-// GET /v1/admin/invokes?limit=&cursor=&tool=&outcome=
+// GET /v1/admin/invokes?limit=&page=&user=<用户名前缀>&outcome=
 func (s *Server) handleAdminInvokes(w http.ResponseWriter, r *http.Request) {
 	query, ok := parseInvokeQuery(w, r)
 	if !ok {
 		return
+	}
+	if user := strings.TrimSpace(r.URL.Query().Get("user")); user != "" {
+		query.Username = user
 	}
 	page, err := s.invokes.ListAll(r.Context(), query)
 	if err != nil {

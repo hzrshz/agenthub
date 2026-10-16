@@ -20,18 +20,19 @@ type InvokeLog struct {
 	OccurredAt time.Time `json:"occurred_at"`
 	UserID     string    `json:"user_id"`
 	// Username 关联 users 表展示（JOIN 填充；用户被删除时为空）。
-	Username   string    `json:"username,omitempty"`
-	NodeID     string    `json:"node_id"`
-	ToolName   string    `json:"tool_name"`
-	Outcome    string    `json:"outcome"` // success | error | timeout | cancelled
-	DurationMS int64     `json:"duration_ms"`
-	ErrorCode  string    `json:"error_code,omitempty"`
+	Username   string `json:"username,omitempty"`
+	NodeID     string `json:"node_id"`
+	ToolName   string `json:"tool_name"`
+	Outcome    string `json:"outcome"` // success | error | timeout | cancelled
+	DurationMS int64  `json:"duration_ms"`
+	ErrorCode  string `json:"error_code,omitempty"`
 }
 
 // InvokeQuery 是一次查询的全部条件。
 // Page 从 1 开始；Limit 每页条数（≤200）。
 type InvokeQuery struct {
-	UserID   string // 空 = 全部（管理员）；非空 = 限定用户
+	UserID   string // 空 = 全部（管理员）；非空 = 限定用户（用户侧自身视图）
+	Username string // 按用户名前缀过滤（管理员流水）；非空时与 UserID 互斥使用
 	ToolName string // 前缀匹配
 	Outcome  string // success/error/timeout/cancelled，空 = 全部
 	Page     int
@@ -106,15 +107,21 @@ func (s *Store) query(ctx context.Context, query InvokeQuery, joinUsers bool) (I
 	conditions := make([]string, 0, 4)
 	args := make([]any, 0, 5)
 	if query.UserID != "" {
-		conditions = append(conditions, `user_id = ?`)
+		conditions = append(conditions, `l.user_id = ?`)
 		args = append(args, query.UserID)
 	}
+	// 用户名过滤（管理员流水）：按 username 前缀匹配，需要 JOIN。
+	// 非 JOIN 查询（用户自身视图）不接受该条件——用户只能看自己。
+	if name := strings.TrimSpace(query.Username); name != "" && joinUsers {
+		conditions = append(conditions, `u.username LIKE ?`)
+		args = append(args, name+"%")
+	}
 	if tool := strings.TrimSpace(query.ToolName); tool != "" {
-		conditions = append(conditions, `tool_name LIKE ?`)
+		conditions = append(conditions, `l.tool_name LIKE ?`)
 		args = append(args, tool+"%")
 	}
 	if query.Outcome != "" {
-		conditions = append(conditions, `outcome = ?`)
+		conditions = append(conditions, `l.outcome = ?`)
 		args = append(args, query.Outcome)
 	}
 	where := `1=1`
@@ -128,9 +135,9 @@ func (s *Store) query(ctx context.Context, query InvokeQuery, joinUsers bool) (I
 		join = ` FROM invoke_logs l`
 	}
 
-	// 总数（满足筛选条件）。
+	// 总数（满足筛选条件；与数据查询保持同一 JOIN，用户名过滤引用 u.username）。
 	var total int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM invoke_logs l WHERE `+where, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*)`+join+` WHERE `+where, args...).Scan(&total); err != nil {
 		return InvokePage{}, fmt.Errorf("统计调用记录: %w", err)
 	}
 

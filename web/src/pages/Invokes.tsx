@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ScrollText } from "lucide-react";
 import { api } from "../api";
-import { Pagination, PageMeta, FilterBar } from "../components/Pagination";
+import { Pagination, PageMeta, FilterBar, UserOption } from "../components/Pagination";
 
 interface InvokeLog {
   id: string;
@@ -32,9 +32,9 @@ const OUTCOME_LABEL: Record<string, string> = {
 export function Invokes({ admin = false }: { admin?: boolean }) {
   const [logs, setLogs] = useState<InvokeLog[]>([]);
   const [meta, setMeta] = useState<PageMeta>({ page: 1, per_page: 20, total: 0 });
-  const [tool, setTool] = useState("");
-  const [toolInput, setToolInput] = useState("");
+  const [user, setUser] = useState("");
   const [outcome, setOutcome] = useState("");
+  const [userOptions, setUserOptions] = useState<UserOption[]>([]);
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
@@ -43,16 +43,20 @@ export function Invokes({ admin = false }: { admin?: boolean }) {
         page: String(meta.page),
         limit: String(meta.per_page),
       });
-      if (tool) params.set("tool", tool);
+      if (user) params.set("user", user);
       if (outcome) params.set("outcome", outcome);
       const resp = await api.get<InvokePage>(`${admin ? "/v1/admin/invokes" : "/v1/invokes"}?${params}`);
       setLogs(resp.items);
       setMeta({ page: resp.page, per_page: resp.per_page, total: resp.total });
       setError("");
+      if (admin && userOptions.length === 0) {
+        const stats = await api.get<{ stats: UserOption[] }>("/v1/admin/stats");
+        setUserOptions(stats.stats.map((s) => ({ user_id: s.user_id, username: s.username })));
+      }
     } catch (e) {
       setError(String(e));
     }
-  }, [admin, meta.page, meta.per_page, tool, outcome]);
+  }, [admin, meta.page, meta.per_page, user, outcome, userOptions.length]);
 
   useEffect(() => {
     void load();
@@ -60,10 +64,9 @@ export function Invokes({ admin = false }: { admin?: boolean }) {
     return () => clearInterval(timer);
   }, [load]);
 
-  const hasFilter = Boolean(tool || outcome);
+  const hasFilter = Boolean(user || outcome);
   const reset = () => {
-    setTool("");
-    setToolInput("");
+    setUser("");
     setOutcome("");
     setMeta((m) => ({ ...m, page: 1 }));
   };
@@ -75,18 +78,19 @@ export function Invokes({ admin = false }: { admin?: boolean }) {
         仅记录时间、节点、工具、结果与耗时；工具参数与返回内容不落库。
       </p>
       <FilterBar
-        toolInput={toolInput}
-        setToolInput={setToolInput}
-        onSearch={() => {
-          setTool(toolInput.trim());
+        admin={admin}
+        userOptions={userOptions}
+        user={user}
+        setUser={(v) => {
+          setUser(v);
           setMeta((m) => ({ ...m, page: 1 }));
         }}
-        onReset={reset}
         outcome={outcome}
         setOutcome={(v) => {
           setOutcome(v);
           setMeta((m) => ({ ...m, page: 1 }));
         }}
+        onReset={reset}
         hasFilter={hasFilter}
       />
       {error && <p className="error">{error}</p>}

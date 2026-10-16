@@ -52,10 +52,21 @@ func TestInvokeQueryBoundaries(t *testing.T) {
 	if len(body["items"].([]any)) != 2 {
 		t.Fatalf("outcome filter: %v", body)
 	}
-	// 筛选：tool=browser 前缀匹配只剩 1 条。
-	resp, body = e.do(t, "GET", "/v1/admin/invokes?tool=browser", adminToken, adminCSRF, nil)
-	if len(body["items"].([]any)) != 1 {
-		t.Fatalf("tool filter: %v", body)
+	// 筛选：按用户名前缀（管理员）只看 alice 的 2 条。
+	resp, body = e.do(t, "GET", "/v1/admin/invokes?user=alice", adminToken, adminCSRF, nil)
+	if len(body["items"].([]any)) != 2 {
+		t.Fatalf("user filter: %v", body)
+	}
+	// 用户名筛选不匹配任何用户时为空集。
+	resp, body = e.do(t, "GET", "/v1/admin/invokes?user=nobody", adminToken, adminCSRF, nil)
+	if len(body["items"].([]any)) != 0 {
+		t.Fatalf("unmatched user filter must be empty: %v", body)
+	}
+	// 用户侧查询不接受 user 参数（强制自身视角，即使伪造参数也无效）。
+	aliceTokenEarly, _ := e.loginAs(t, "alice@example.com", "initial-pass-123456")
+	resp, body = e.do(t, "GET", "/v1/invokes?user=someone_else", aliceTokenEarly, "", nil)
+	if len(body["items"].([]any)) != 2 {
+		t.Fatalf("user param must be ignored on user view: %v", body)
 	}
 
 	// 页码分页：limit=2 首页 2 条 + total=3；第 2 页取到剩余 1 条。

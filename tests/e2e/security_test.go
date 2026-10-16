@@ -13,8 +13,8 @@ import (
 )
 
 type hub struct {
-	auth   *auth.Service
-	nodes  *nodes.Store
+	auth  *auth.Service
+	nodes *nodes.Store
 }
 
 func newHub(t *testing.T) *hub {

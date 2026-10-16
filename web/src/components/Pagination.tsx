@@ -85,28 +85,45 @@ export function Pagination({
   );
 }
 
-// FilterBar：调用记录页的筛选行（工具名 + 结果下拉）。
-import { Search, RotateCcw } from "lucide-react";
+// FilterBar：调用记录页的筛选行。
+// admin 视图：按用户下拉（选项由 stats API 提供）+ 结果下拉；
+// 用户视图：仅结果下拉（自己的记录没有按用户/工具筛选的价值）。
+import { RotateCcw, User as UserIcon } from "lucide-react";
+
+export interface UserOption {
+  user_id: string;
+  username: string;
+}
 
 export function FilterBar({
-  toolInput,
-  setToolInput,
-  onSearch,
-  onReset,
+  admin = false,
+  userOptions = [],
+  user,
+  setUser,
   outcome,
   setOutcome,
+  onReset,
   hasFilter,
 }: {
-  toolInput: string;
-  setToolInput: (v: string) => void;
-  onSearch: () => void;
-  onReset: () => void;
+  admin?: boolean;
+  userOptions?: UserOption[];
+  user?: string;
+  setUser?: (v: string) => void;
   outcome: string;
   setOutcome: (v: string) => void;
+  onReset: () => void;
   hasFilter: boolean;
 }) {
   return (
     <div className="filter-row">
+      {admin && (
+        <select value={user ?? ""} onChange={(e) => setUser?.(e.target.value)} aria-label="按用户筛选">
+          <option value="">全部用户</option>
+          {userOptions.map((u) => (
+            <option key={u.user_id} value={u.username}>{u.username}</option>
+          ))}
+        </select>
+      )}
       <select value={outcome} onChange={(e) => setOutcome(e.target.value)} aria-label="按结果筛选">
         <option value="">全部结果</option>
         <option value="success">成功</option>
@@ -114,17 +131,12 @@ export function FilterBar({
         <option value="timeout">超时</option>
         <option value="cancelled">已取消</option>
       </select>
-      <form onSubmit={(e) => { e.preventDefault(); onSearch(); }}>
-        <input
-          placeholder="按工具名过滤（前缀匹配）"
-          value={toolInput}
-          onChange={(e) => setToolInput(e.target.value)}
-        />
-        <button type="submit"><Search size={13} />查询</button>
-        {hasFilter && (
-          <button type="button" onClick={onReset}><RotateCcw size={13} />重置</button>
-        )}
-      </form>
+      {hasFilter && (
+        <button type="button" onClick={onReset}><RotateCcw size={13} />重置</button>
+      )}
+      {admin && userOptions.length === 0 && (
+        <span className="muted"><UserIcon size={12} style={{ verticalAlign: -2 }} /> 暂无用户数据</span>
+      )}
     </div>
   );
 }
