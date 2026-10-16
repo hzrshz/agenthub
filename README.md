@@ -52,36 +52,77 @@ HUB_DATA_DIR=/var/lib/agenthub HUB_PUBLIC_URL=https://hub.example.com \
 
 因此"先用 IP 测试、之后迁移到 HTTPS 域名"完全支持：改环境变量重启后，Web/平台侧立即用新地址；**已配对的节点仍按旧地址连接**（继续工作，只是走旧地址）。若希望节点也切到新域名，删掉节点重新配对即可（Device Token 随删除吊销）。
 
-### 本地测试步骤（无 HTTPS，先跑通全链路）
+### 本地测试步骤（含局域网 AgentDock 配对：需要本地 HTTPS）
 
-前置：本机已构建 `agenthub` 二进制（`go build -o agenthub ./cmd/agenthub`），局域网内有一台设备可以运行 AgentDock。以下假设本机局域网 IP 为 `192.168.1.10`（`ipconfig getifaddr en0` 查询），AgentDock 与本机同一网段。
+**先说一个关键限制**（源码确认，配对报"公网 NexusDock endpoint 必须使用 HTTPS"即此原因）：AgentDock 侧对配对 endpoint 的校验只放行三种形态——
+
+1. `https://任意地址`（含局域网 IP，自签证书见下文）
+2. `http://localhost:<port>` / `http://127.0.0.1:<port>`（仅 AgentDock 与 hub 同机时可用）
+3. 其他一律拒绝：`http://<局域网IP>` 也不行，**写了 `/mcp` 路径也不行**（endpoint 必须是不带路径的 origin）
+
+因此局域网内另一台设备上的 AgentDock 要配对到你的 hub，**必须在 hub 前面架一个本地 HTTPS 反代**（哪怕用自签证书），配对地址写 `https://<局域网IP>:8443`。同机测试可以跳过反代直接用 `http://127.0.0.1:8787`。
+
+#### 方案 A：同机快速测试（无 TLS，5 分钟）
+
+AgentDock 与 hub 在同一台机器上时可用。
 
 ```bash
-# 1. 初始化管理员（用局域网 IP 作为 PublicURL；端口与 HUB_LISTEN 一致）
-HUB_DATA_DIR=~/.agenthub-test HUB_PUBLIC_URL=http://192.168.1.10:8787 \
+go build -o agenthub ./cmd/agenthub
+
+# 1. 初始化并启动（PublicURL 与 AgentDock 的配对地址一致）
+HUB_DATA_DIR=~/.agenthub-test HUB_PUBLIC_URL=http://127.0.0.1:8787 \
   ./agenthub admin init
-
-# 2. 启动服务（监听 0.0.0.0 才能让局域网设备访问）
-HUB_DATA_DIR=~/.agenthub-test HUB_PUBLIC_URL=http://192.168.1.10:8787 \
+HUB_DATA_DIR=~/.agenthub-test HUB_PUBLIC_URL=http://127.0.0.1:8787 \
   HUB_LISTEN=0.0.0.0:8787 ./agenthub serve
+
+# 2. 浏览器打开 http://127.0.0.1:8787 → 管理员登录 → 创建普通用户
+# 3. 用户登录 → "生成配对码" → AgentDock 侧填：
+#    地址 = http://127.0.0.1:8787   （不要带 /mcp）
+#    一次性配对码 = <界面上的码> → 点"配对并重启"
+# 4. Agent 平台接入：endpoint = http://127.0.0.1:8787/mcp，
+#    Authorization: Bearer <建号时返回的 MCP Token>
 ```
+
+#### 方案 B：局域网设备配对（caddy 自签 HTTPS）
+
+hub 在本机（假设局域网 IP 为 `192.168.1.10`，`ipconfig getifaddr en0` 查询），AgentDock 在局域网另一台设备上。
 
 ```bash
-# 3. 浏览器打开 http://192.168.1.10:8787，管理员登录，创建一个普通用户
-#    （建号响应里会返回该用户的 MCP Token 与 endpoint，记下）
+# 1. 安装 caddy（brew install caddy）并用它生成本地 CA 自签证书
+mkcert -install                                    # 或: caddy 的 local CA 亦可
+mkcert 192.168.1.10                                # 生成 192.168.1.10+2.pem/.key
+mkdir -p ~/.agenthub-certs && mv 192.168.1.10+*.pem 192.168.1.10+*-key.pem ~/.agenthub-certs/
 
-# 4. 以新用户登录，页面点"生成配对码"，在 AgentDock 设备上执行：
-agentdock nexus pair --endpoint http://192.168.1.10:8787 --code <配对码>
+# 2. caddy 反代：4443(HTTPS) → 8787(hub)，Caddyfile 内容见下
+cat > ~/.agenthub-certs/Caddyfile <<'EOF'
+{
+  auto_https off
+}
+https://192.168.1.10:4443 {
+  tls ~/.agenthub-certs/192.168.1.10+2.pem ~/.agenthub-certs/192.168.1.10+2-key.pem
+  reverse_proxy 127.0.0.1:8787
+}
+EOF
+caddy start --config ~/.agenthub-certs/Caddyfile
 
-# 5. 界面上节点变为"在线"后，Agent 平台以 MCP client 接入：
-#    endpoint = http://192.168.1.10:8787/mcp
-#    Authorization: Bearer <该用户的 MCP Token>
-#    先调 nodes_context 拿 node_id，再带 node_id 调用具体工具。
+# 3. hub 用 https origin 启动（PublicURL 与 AgentDock 将填的地址一致）
+HUB_DATA_DIR=~/.agenthub-test HUB_PUBLIC_URL=https://192.168.1.10:4443 \
+  HUB_LISTEN=0.0.0.0:8787 ./agenthub serve
+
+# 4. AgentDock 设备上：信任 mkcert 根证书（mkcert -install 在设备上执行，或手动导入
+#    ~/Library/Application Support/mkcert/rootCA.pem），然后配对：
+#    地址 = https://192.168.1.10:4443   （不要带 /mcp）
+#    一旦 AgentDock 报证书错误，说明设备未信任 mkcert 根 CA。
+
+# 5. Agent 平台接入：endpoint = https://192.168.1.10:4443/mcp
+#    （平台侧若报证书错误，同样需要信任 mkcert 根 CA，或平台跳过校验）
 ```
 
-注意：AgentDock 节点侧对 endpoint 的校验与 hub 一致——`http://` 只接受 localhost 或 IP 地址，所以测试期必须用 `http://<IP>:8787` 形态，不能写内网主机名。
+> Windows 的 AgentDock 设备：把 mkcert 生成的 `rootCA.pem` 双击导入"受信任的根证书颁发机构"即可。
 
-**迁移到 HTTPS 生产站点**：
+测试结束后 `caddy stop`。
+
+#### 迁移到 HTTPS 生产站点
 
 ```bash
 # 1. 停服务，改环境变量为 https 域名（反代已终结 TLS 并指向 HUB_LISTEN）
