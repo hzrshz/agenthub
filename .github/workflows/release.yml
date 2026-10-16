@@ -24,6 +24,7 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux：生产部署（含国产化架构）
           - goos: linux
             goarch: amd64
           - goos: linux
@@ -32,6 +33,14 @@ jobs:
             goarch: loong64
           - goos: linux
             goarch: riscv64
+          # macOS：本地测试（Intel/Apple Silicon）
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          # Windows：Windows Server 部署
+          - goos: windows
+            goarch: amd64
     steps:
       - uses: actions/checkout@v4
 
@@ -60,10 +69,13 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
           go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
-            -o "dist/agenthub-${GOOS}-${GOARCH}" ./cmd/agenthub
+            -o "dist/agenthub-${GOOS}-${GOARCH}${EXT}" ./cmd/agenthub
 
       - name: Verify static linkage
+        if: matrix.goos == 'linux'
         run: |
           file "dist/agenthub-${{ matrix.goos }}-${{ matrix.goarch }}"
           # 静态链接校验：不允许出现 interpreter（动态链接器）。
