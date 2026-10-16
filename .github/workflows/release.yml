@@ -173,7 +173,8 @@ jobs:
           for TAG in $TAGS; do
             docker buildx imagetools create -t "$TAG" ${{ env.DIGESTS }}
           done
-          docker buildx imagetools inspect "${IMAGE}:latest" | head -20
+          # 按平台过滤验证（index 还含 per-arch provenance attestation，输出很长）。
+          docker buildx imagetools inspect "${IMAGE}:latest" | grep "Platform:"
 
   release:
     needs: binaries
