@@ -27,6 +27,17 @@ jobs:
       - name: Build web bundle
         run: make web
 
+      # 产物漂移守门：提交的 web_dist 必须与源码构建结果一致，
+      # 防止"改了前端源码忘了重新构建就提交"。
+      - name: Check embedded web bundle is up to date
+        run: |
+          if [ -n "$(git status --porcelain internal/httpx/web_dist)" ]; then
+            echo "ERROR: internal/httpx/web_dist is stale. Run 'make web' and commit the rebuilt bundle."
+            git status --porcelain internal/httpx/web_dist
+            git diff --stat internal/httpx/web_dist | head -20
+            exit 1
+          fi
+
       - name: Test
         run: go test ./... -count=1
 
