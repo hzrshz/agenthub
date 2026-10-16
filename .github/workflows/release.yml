@@ -151,10 +151,11 @@ jobs:
             for TAG in $TAGS; do
               PER_ARCH_TAGS="$PER_ARCH_TAGS -t $IMAGE-$ARCH"
             done
+            # buildx 的进度日志（含 pushing manifest）走 stderr，$() 需 2>&1 合并。
             OUT=$(docker buildx build \
               --platform "linux/$ARCH" \
               --build-arg "BIN_NAME=bin/agenthub-linux-$ARCH" \
-              --push $PER_ARCH_TAGS .)
+              --push $PER_ARCH_TAGS . 2>&1)
             # buildx --push 成功时最后一行是 "pushing manifest for <tag>@sha256:<hex>"，
             # 从中抓取 per-arch manifest 的 digest。
             DIGEST=$(echo "$OUT" | grep -oE 'pushing manifest for [^ ]+@sha256:[a-f0-9]{64}' | grep -oE 'sha256:[a-f0-9]{64}' | tail -1)
