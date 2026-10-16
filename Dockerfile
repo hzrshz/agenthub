@@ -1,22 +1,21 @@
 # AgentHub 容器镜像：多阶段构建。
-# 产物为静态链接二进制（纯 Go 栈，CGO_ENABLED=0），运行层用 distroless static，
-# 无 shell、无包管理器，攻击面最小；国产化架构（arm64/loong64/riscv64）由
-# release workflow 的 docker/build-push-action 按 matrix 扩展。
-# web 产物必须先于 go build 就位（go:embed），故第一阶段先做前端构建。
-FROM node:22-alpine AS web
-WORKDIR /src/web
-COPY web/package.json web/package-lock.json ./
-RUN npm ci --no-audit --no-fund
-COPY web/ ./
-RUN npm run build
+# 产物为静态链接二进制（纯 Go 栈，CGO_ENABLED=0），运行层用 alpine
+# （全架构官方镜像，含 loong64 之外的国产化目标）；国产化架构
+# （arm64/loong64/riscv64）由 release workflow 的 docker/build-push-action 扩展。
+#
+# web 产物不进镜像构建：node:22-alpine 没有 loong64/riscv64 官方镜像，
+# 且前端产物对全架构完全相同。构建顺序固定为：
+#   make web  →  internal/httpx/web_dist 就位  →  docker build（go:embed 直接吃）
+# 本地/CI 都在 docker build 之前执行 make web。
 
-FROM golang:1.26-alpine AS build
+# 编译层用 golang:1.26（debian 系，官方发布全架构含 loong64/riscv64）；
+# golang:1.26-alpine 缺少这两个国产化架构变体。产物是 CGO_ENABLED=0
+# 静态二进制，与编译基础镜像的 libc 无关，运行层仍用 alpine。
+FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# npm build 的 outDir 是 ../internal/httpx/web_dist（相对 web/），
-# 上一阶段工作目录为 /src/web，产物已落在 /src/internal/httpx/web_dist。
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \

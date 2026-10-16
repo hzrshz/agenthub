@@ -95,6 +95,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # go:embed 需要 web_dist 就位；在 docker build 前重建保证与源码一致。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web bundle
+        run: make web
+
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64,loong64,riscv64

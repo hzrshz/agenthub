@@ -81,18 +81,26 @@ func TestNodePairingLifecycle(t *testing.T) {
 		t.Fatalf("expected node.ready, got %v", readyMsg)
 	}
 
-	// 用户节点列表必须显示在线。
-	resp, body = e.do(t, "GET", "/v1/nodes", userToken, "", nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("list nodes: %d", resp.StatusCode)
-	}
-	nodesList, _ := body["nodes"].([]any)
-	if len(nodesList) != 1 {
-		t.Fatalf("expected 1 node, got %v", body)
-	}
-	first, _ := nodesList[0].(map[string]any)
-	if first["online"] != true || first["id"] != nodeID {
-		t.Fatalf("node must be online: %v", first)
+	// 用户节点列表必须显示在线。ready 已确认，但 hub 登记与查询接口
+	// 存在毫秒级窗口；慢架构（QEMU riscv64）上需要轮询等待。
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp, body = e.do(t, "GET", "/v1/nodes", userToken, "", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("list nodes: %d", resp.StatusCode)
+		}
+		nodesList, _ := body["nodes"].([]any)
+		if len(nodesList) != 1 {
+			t.Fatalf("expected 1 node, got %v", body)
+		}
+		first, _ := nodesList[0].(map[string]any)
+		if first["online"] == true && first["id"] == nodeID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("node never became online: %v", first)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// 管理员（另一用户）不可见该节点。
