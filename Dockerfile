@@ -22,7 +22,10 @@ RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/agenthub ./cmd/agenthub
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# 运行层选 alpine 而非 distroless：distroless 不发布 loong64/riscv64，
+# 多架构国产化镜像必须用有全架构官方支持的基础镜像。
+# 产物是 CGO_ENABLED=0 静态二进制，alpine 的 musl 不参与链接，行为一致。
+FROM alpine:3.20
 # 时区数据：界面/日志按本地时区展示。
 COPY --from=build /usr/local/go/lib/time/zoneinfo.zip /zoneinfo.zip
 ENV TZ=Asia/Shanghai \
@@ -34,6 +37,7 @@ VOLUME ["/data"]
 ENV HUB_DATA_DIR=/data \
     HUB_LISTEN=0.0.0.0:8787
 EXPOSE 8787
-USER nonroot:nonroot
+# 非 root 运行（alpine 内置 nobody）。
+USER nobody
 ENTRYPOINT ["/agenthub"]
 CMD ["serve"]
