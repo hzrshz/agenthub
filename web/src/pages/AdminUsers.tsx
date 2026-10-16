@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { UserPlus, Ban, CirclePlay, KeyRound, ShieldCheck } from "lucide-react";
+import { UserPlus, Ban, CirclePlay, KeyRound, ShieldCheck, Eye, EyeOff, X } from "lucide-react";
 import { api } from "../api";
 
 interface User {
@@ -16,6 +16,10 @@ export function AdminUsers() {
   const [newUsername, setNewUsername] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [created, setCreated] = useState<{ token: string; endpoint: string } | null>(null);
+  const [showCreatePwd, setShowCreatePwd] = useState(false);
+  const [resetTarget, setResetTarget] = useState<User | null>(null);
+  const [resetPwd, setResetPwd] = useState("");
+  const [showResetPwd, setShowResetPwd] = useState(false);
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
@@ -65,11 +69,12 @@ export function AdminUsers() {
       setError(String(e));
     }
   };
-  const resetPassword = async (id: string) => {
-    const password = prompt("输入新密码（至少 12 字符）");
-    if (!password) return;
+  const submitResetPassword = async () => {
+    if (!resetTarget) return;
     try {
-      await api.post(`/v1/admin/users/${id}/reset-password`, { password });
+      await api.post(`/v1/admin/users/${resetTarget.id}/reset-password`, { password: resetPwd });
+      setResetTarget(null);
+      setResetPwd("");
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -86,12 +91,19 @@ export function AdminUsers() {
           value={newUsername}
           onChange={(e) => setNewUsername(e.target.value)}
         />
-        <input
-          placeholder="初始密码（至少 12 字符）"
-          style={{ width: 240 }}
-          value={newPassword}
-          onChange={(e) => setNewPassword(e.target.value)}
-        />
+        <div className="pwd-field">
+          <input
+            type={showCreatePwd ? "text" : "password"}
+            placeholder="初始密码（至少 12 字符）"
+            style={{ width: 240 }}
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+          />
+          <button type="button" className="pwd-toggle" onClick={() => setShowCreatePwd((v) => !v)}
+            aria-label={showCreatePwd ? "隐藏密码" : "显示密码"}>
+            {showCreatePwd ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
+        </div>
         <button className="primary" onClick={() => void create()}>
           <UserPlus size={14} />创建用户
         </button>
@@ -135,12 +147,45 @@ export function AdminUsers() {
                 ) : (
                   <button onClick={() => void enable(user.id)}><CirclePlay size={13} />启用</button>
                 )}
-                <button onClick={() => void resetPassword(user.id)}><KeyRound size={13} />重置密码</button>
+                <button onClick={() => { setResetTarget(user); setResetPwd(""); }}><KeyRound size={13} />重置密码</button>
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+
+      {resetTarget && (
+        <div className="modal-mask" onClick={() => setResetTarget(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h2 style={{ margin: 0 }}><KeyRound size={16} />重置密码 — {resetTarget.username}</h2>
+              <button className="pwd-toggle" onClick={() => setResetTarget(null)} aria-label="关闭"><X size={15} /></button>
+            </div>
+            <p className="muted" style={{ margin: "10px 0 14px" }}>
+              重置后该用户全部会话失效，下次登录强制改密。
+            </p>
+            <div className="pwd-field" style={{ width: "100%" }}>
+              <input
+                type={showResetPwd ? "text" : "password"}
+                placeholder="新密码（至少 12 字符）"
+                style={{ width: "100%" }}
+                autoFocus
+                value={resetPwd}
+                onChange={(e) => setResetPwd(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && void submitResetPassword()}
+              />
+              <button type="button" className="pwd-toggle" onClick={() => setShowResetPwd((v) => !v)}
+                aria-label={showResetPwd ? "隐藏密码" : "显示密码"}>
+                {showResetPwd ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
+              <button onClick={() => setResetTarget(null)}>取消</button>
+              <button className="primary" onClick={() => void submitResetPassword()}>确认重置</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -349,3 +349,30 @@ tbody tr:hover td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
   font-family: var(--font-mono); color: var(--ink-faint);
   letter-spacing: 0.2em;
 }
+
+/* ===== 密码输入（显隐切换）与弹窗 ===== */
+.pwd-field { display: inline-flex; align-items: center; position: relative; }
+.pwd-field input { padding-right: 38px; }
+.pwd-toggle {
+  position: absolute; right: 6px;
+  border: none; background: none;
+  padding: 4px; color: var(--ink-faint);
+}
+.pwd-toggle:hover { color: var(--ink); background: none; }
+
+.modal-mask {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  display: grid; place-items: center;
+  animation: mask-in 0.2s ease;
+}
+@keyframes mask-in { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  width: min(440px, 92vw);
+  background: var(--bg-elev);
+  border: 1px solid var(--line-strong);
+  padding: 24px;
+  animation: card-in 0.25s cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; }
