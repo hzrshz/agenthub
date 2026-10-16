@@ -101,3 +101,59 @@ AgentDock ──出站 WSS──▶ ┌─────────┐ ◀──M
 ## 8. v1 范围边界（明确不做）
 
 Recall、Workflow 模板、Skill/MCP 编排、i18n、邮件通知、自助注册、每用户路径 endpoint、Prometheus/OTel、管理员内容级审计、artifact 下载、离线排队。将来若加 Recall/Workflow，数据模型已按用户分区（owner_user_id 贯穿），扩展点现成。
+
+## 9. 后续规划：Hub 作为 OAuth 授权服务器（MCP client 接入 /mcp）
+
+**状态：规划中，v1 未实现。** 触发条件：出现"自带 OAuth 能力的外部 MCP client"（Claude Desktop、ChatGPT connector 等通用客户端，或第三方系统）需要接入用户工具面的真实需求时启动。现有静态 MCP Token 保留，两者长期共存、互不影响——与 NexusDock 的双轨模式一致（见其 `internal/httpx/oauth.go`，可整体参考）。
+
+### 9.1 定位与范围
+
+- Hub 充当 **OAuth 2.0 授权服务器**，保护资源为 `/mcp`（每用户的 MCP 工具面）。
+- 服务对象：支持 MCP 规范认证（RFC 8414 服务器元数据 + RFC 9728 受保护资源元数据 + 授权码流程 + PKCE）的 client。
+- **不做** client credentials 机器流（自有系统继续用静态 Token）；**不做**节点侧认证改动（节点→hub 保持 device token，设备无人值守，授权码流程不适用，此方向永不引入 OAuth）。
+- 与静态 Token 的关系：同一 `/mcp` 路径，`Authorization: Bearer` 头同时接受两种凭证——OAuth 签发的 access token 与用户静态 MCP Token。认证中间件先查静态 token 哈希表，未命中再走 OAuth token 校验。
+
+### 9.2 协议面（需要新增的 endpoint）
+
+```
+GET  /.well-known/oauth-protected-resource/mcp   RFC 9728 资源元数据（401 响应里已预留 WWW-Authenticate 指向此处）
+GET  /.well-known/oauth-authorization-server     RFC 8414 服务器元数据（issuer、authorize/token/registration endpoint）
+GET  /oauth/authorize                            授权端点（浏览器跳转，用户登录 + 同意页）
+POST /oauth/authorize                            同意提交
+POST /oauth/token                                token 端点（authorization_code + refresh_token 两类 grant）
+POST /oauth/register                             动态客户端注册（DCR，MCP 生态惯例；也可做成界面手动注册，DCR 优先）
+GET  /oauth/consent                              （若不做 DCR）已注册 client 列表/撤销，并入用户设置页即可
+```
+
+### 9.3 数据模型（新增表，沿用现有 SQLite 与 user_version 迁移机制）
+
+```sql
+oauth_clients        (id PK, owner_user_id FK→users, client_name, redirect_uris_json,
+                      token_endpoint_auth_method CHECK(='none'), created_at, revoked_at)
+oauth_authorization_codes (code_hash UNIQUE PK, client_id FK, owner_user_id FK,
+                      redirect_uri, code_challenge, code_challenge_method, expires_at, used_at)
+oauth_grants         (id PK, client_id FK, owner_user_id FK, scope='mcp',
+                      access_token_hash UNIQUE, refresh_token_hash UNIQUE,
+                      expires_at, revoked_at, created_at)
+oauth_refresh_token_history (refresh_token_hash PK, replaced_by_hash, rotated_at)  -- 轮换审计
+```
+
+关键点：**grant 归属 owner_user_id**——token 解析出用户后，工具面装配逻辑与静态 token 完全共用（`registerUserTools` / `callNodeTool` 无需任何改动）。`oauth_clients` 带 owner 是与 NexusDock 的差异：client 属于某个用户，注册时即绑定，防止跨用户 client 伪造。
+
+### 9.4 实现要点（照搬 NexusDock 的部分）
+
+- **PKCE 强制**：`code_challenge_method` 只接受 `S256`，public client 无 client secret。
+- **token 形态**：不透明 token（随机串）+ 哈希落库，不签 JWT——与现有三类秘密的哈希存储模型一致，省掉密钥管理。access token 有效期建议 1h，refresh token 30d，刷新即轮换（旧 refresh token 进 history 表，重放检测→撤销整条 grant）。
+- **同意页**：复用 Web 会话认证（未登录先跳登录），展示 client 名称与"将获得该用户全部节点工具的调用权限"，允许/拒绝。首次同意建 grant，静默续期。
+- **401 处理**：现有 `writeMCPError` 的 `WWW-Authenticate` 已带 `resource_metadata="/.well-known/mcp"`，实现时保持该头并将路径改为真实的 RFC 9728 端点。
+- **参考实现**：NexusDock `internal/httpx/oauth.go`（约 800 行，含同意页模板与 token 端点）、`mcp_oauth_callback.go`（回调中转，若将来做节点侧第三方 MCP 的回调转发可一并参考）。拷贝改造时删除与 Nexus Apps（recall/workflow）耦合的 scope 逻辑，scope 固定 `mcp`。
+
+### 9.5 工作量估计与验收
+
+约 2-3 天：元数据端点 + DCR 半天，authorize/token + PKCE 一天，同意页 + 客户端管理界面半天，SDK 真实 client（go-sdk 的 `mcp.NewClient` 走 OAuth round-trip）e2e 半天。验收标准：Claude Desktop 或任一标准 MCP client 配置 hub URL 后，无手工 token 即可完成授权并调用到对应用户的工具；重放 refresh token 导致整条 grant 撤销；撤销后该 client 的 token 立即 401。
+
+### 9.6 明确不采用的方向（避免翻旧账）
+
+- 节点→hub 方向的任何 OAuth（见 9.1）。
+- JWT / 对称签名 token：引入密钥轮换问题，与 hub"秘密只存哈希"的模型冲突。
+- 每用户独立 issuer/多租户隔离的授权服务器：单一 issuer，client 按 owner_user_id 分区即可。

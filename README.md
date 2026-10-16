@@ -149,6 +149,11 @@ make release-linux   # 产出 dist/agenthub-linux-<arch> + checksums.txt
 
 GitHub Actions：`ci.yml` 在每次推送时做测试 + vet + loong64 静态编译冒烟（守门，防止日常提交破坏国产化目标）；`release.yml` 在打 `v*` tag 时构建全部目标、校验静态链接、自动创建 Release 并附 sha256 校验和。
 
+## 路线图
+
+- **v1（当前）**：静态 MCP Token 接入 `/mcp`（面向自有平台机器对机器调用）。
+- **规划中**：Hub 作为 OAuth 授权服务器，支持带 OAuth 能力的外部 MCP client（Claude Desktop 等）自助授权接入 `/mcp`，与静态 Token 双轨共存。设计方案（协议面/数据模型/实现要点）见 [docs/DESIGN.md §9](docs/DESIGN.md)。节点侧认证保持 device token 模式不变。
+
 ## 安全模型（摘要）
 
 - 三类秘密（Web session / 每用户 MCP Token / 每节点 Device Token）全部只存 SHA-256 哈希；口令 argon2id。
