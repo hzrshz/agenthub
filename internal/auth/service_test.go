@@ -88,13 +88,9 @@ func TestLoginThrottleBlocksEvenCorrectPassword(t *testing.T) {
 	if _, err := svc.Login(ctx, "root@example.com", "wrong-password-123", "203.0.113.9"); err == nil {
 		t.Fatal("wrong password must fail")
 	}
-	// 封锁窗口内（失败 1 的 250ms 窗口）正确口令也必须被拒。
-	_, err := svc.Login(ctx, "root@example.com", strongPassword, "203.0.113.9")
-	var rate *RateLimitError
-	if !errors.As(err, &rate) {
-		t.Fatalf("correct password must be blocked inside throttle window, got %v", err)
-	}
 	// 阶梯递增：连续失败最终到达长封锁档位。
+	// 直接驱动 recordLoginFailure 验证阶梯；不走 Login+真实 argon2，
+	// 因为 250ms 级短窗口在慢 CI（QEMU/共享 runner）上不可依赖真实时钟。
 	var longest time.Duration
 	for i := 2; i <= 7; i++ {
 		if got := svc.recordLoginFailure(ctx, core.HashToken(strings.ToLower("root@example.com")), core.HashToken("203.0.113.9")); got > longest {
@@ -103,6 +99,12 @@ func TestLoginThrottleBlocksEvenCorrectPassword(t *testing.T) {
 	}
 	if longest < 5*time.Minute {
 		t.Fatalf("7 failures must reach 5-minute tier, got %v", longest)
+	}
+	// 封锁窗口内正确口令也必须被拒（此时 blocked_until 在 5 分钟后，无时钟竞态）。
+	_, err := svc.Login(ctx, "root@example.com", strongPassword, "203.0.113.9")
+	var rate *RateLimitError
+	if !errors.As(err, &rate) {
+		t.Fatalf("correct password must be blocked inside throttle window, got %v", err)
 	}
 }
 
