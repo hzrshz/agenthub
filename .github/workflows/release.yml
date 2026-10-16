@@ -102,7 +102,7 @@ jobs:
       - name: Download binaries
         uses: actions/download-artifact@v4
         with:
-          pattern: agenthub-linux-*
+          pattern: agenthub-*
           merge-multiple: true
           path: bin
 
@@ -169,10 +169,11 @@ jobs:
 
       - name: Create multi-arch manifest
         run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           for TAG in $TAGS; do
             docker buildx imagetools create -t "$TAG" ${{ env.DIGESTS }}
           done
-          docker buildx imagetools inspect "$IMAGE:latest" | head -20
+          docker buildx imagetools inspect "${IMAGE}:latest" | head -20
 
   release:
     needs: binaries
@@ -181,7 +182,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: agenthub-linux-*
+          pattern: agenthub-*
           merge-multiple: true
           path: dist/
 
