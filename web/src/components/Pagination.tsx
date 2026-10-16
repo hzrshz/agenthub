@@ -38,6 +38,13 @@ export function Pagination({
       <span className="info">
         {from}–{to} / {meta.total} RECORDS
       </span>
+      {onPerPage && (
+        <select value={meta.per_page} onChange={(e) => onPerPage(parseInt(e.target.value, 10))} aria-label="每页条数">
+          {[20, 50, 100].map((n) => (
+            <option key={n} value={n}>{n} / 页</option>
+          ))}
+        </select>
+      )}
       <span className="pager">
         <button disabled={current <= 1} onClick={() => onPage(1)} aria-label="第一页"><ChevronsLeft size={13} /></button>
         <button disabled={current <= 1} onClick={() => onPage(current - 1)} aria-label="上一页"><ChevronLeft size={13} /></button>
@@ -74,13 +81,6 @@ export function Pagination({
         />
         / {totalPages}
       </span>
-      {onPerPage && (
-        <select value={meta.per_page} onChange={(e) => onPerPage(parseInt(e.target.value, 10))}>
-          {[20, 50, 100].map((n) => (
-            <option key={n} value={n}>{n} / 页</option>
-          ))}
-        </select>
-      )}
     </div>
   );
 }
@@ -107,6 +107,13 @@ export function FilterBar({
 }) {
   return (
     <div className="filter-row">
+      <select value={outcome} onChange={(e) => setOutcome(e.target.value)} aria-label="按结果筛选">
+        <option value="">全部结果</option>
+        <option value="success">成功</option>
+        <option value="error">失败</option>
+        <option value="timeout">超时</option>
+        <option value="cancelled">已取消</option>
+      </select>
       <form onSubmit={(e) => { e.preventDefault(); onSearch(); }}>
         <input
           placeholder="按工具名过滤（前缀匹配）"
@@ -118,13 +125,6 @@ export function FilterBar({
           <button type="button" onClick={onReset}><RotateCcw size={13} />重置</button>
         )}
       </form>
-      <select value={outcome} onChange={(e) => setOutcome(e.target.value)}>
-        <option value="">全部结果</option>
-        <option value="success">成功</option>
-        <option value="error">失败</option>
-        <option value="timeout">超时</option>
-        <option value="cancelled">已取消</option>
-      </select>
     </div>
   );
 }
