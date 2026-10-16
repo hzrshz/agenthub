@@ -36,9 +36,64 @@ HUB_DATA_DIR=/var/lib/agenthub HUB_PUBLIC_URL=https://hub.example.com \
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `HUB_PUBLIC_URL` | 是 | hub 的公网 HTTPS origin（无路径）。节点据此推导回调地址，必须 `https://` |
-| `HUB_DATA_DIR` | 否 | 数据目录（SQLite 单文件 + 日志），默认 `~/.agenthub` |
-| `HUB_LISTEN` | 否 | 监听地址，默认 `127.0.0.1:8787` |
+| `HUB_PUBLIC_URL` | 是 | hub 对外访问的 origin（无路径）。**生产必须 `https://`；测试允许 `http://localhost` 或 `http://<局域网IP>`**，公网 http 域名会被拒绝 |
+| `HUB_DATA_DIR` | 否 | 数据目录（SQLite 单文件），默认 `~/.agenthub`（容器内 `/data`） |
+| `HUB_LISTEN` | 否 | 监听地址，默认 `127.0.0.1:8787`（容器内 `0.0.0.0:8787`） |
+
+### HUB_PUBLIC_URL 的生效范围与修改
+
+`HUB_PUBLIC_URL` 是纯启动配置，**不落库**，改完重启即生效。它影响三处，修改后的传导各不相同：
+
+| 影响点 | 修改后是否自动跟随 |
+|---|---|
+| Web 界面展示的 MCP endpoint | ✅ 重启即跟随新值 |
+| `node.ready` 下发给节点的回调地址（OAuth redirect） | ✅ 节点下次重连即拿到新值 |
+| **已配对节点的 WebSocket 连接目标** | ❌ 节点连的是**配对时输入的 endpoint**（存于节点侧），改 hub 不断开已连节点 |
+
+因此"先用 IP 测试、之后迁移到 HTTPS 域名"完全支持：改环境变量重启后，Web/平台侧立即用新地址；**已配对的节点仍按旧地址连接**（继续工作，只是走旧地址）。若希望节点也切到新域名，删掉节点重新配对即可（Device Token 随删除吊销）。
+
+### 本地测试步骤（无 HTTPS，先跑通全链路）
+
+前置：本机已构建 `agenthub` 二进制（`go build -o agenthub ./cmd/agenthub`），局域网内有一台设备可以运行 AgentDock。以下假设本机局域网 IP 为 `192.168.1.10`（`ipconfig getifaddr en0` 查询），AgentDock 与本机同一网段。
+
+```bash
+# 1. 初始化管理员（用局域网 IP 作为 PublicURL；端口与 HUB_LISTEN 一致）
+HUB_DATA_DIR=~/.agenthub-test HUB_PUBLIC_URL=http://192.168.1.10:8787 \
+  ./agenthub admin init
+
+# 2. 启动服务（监听 0.0.0.0 才能让局域网设备访问）
+HUB_DATA_DIR=~/.agenthub-test HUB_PUBLIC_URL=http://192.168.1.10:8787 \
+  HUB_LISTEN=0.0.0.0:8787 ./agenthub serve
+```
+
+```bash
+# 3. 浏览器打开 http://192.168.1.10:8787，管理员登录，创建一个普通用户
+#    （建号响应里会返回该用户的 MCP Token 与 endpoint，记下）
+
+# 4. 以新用户登录，页面点"生成配对码"，在 AgentDock 设备上执行：
+agentdock nexus pair --endpoint http://192.168.1.10:8787 --code <配对码>
+
+# 5. 界面上节点变为"在线"后，Agent 平台以 MCP client 接入：
+#    endpoint = http://192.168.1.10:8787/mcp
+#    Authorization: Bearer <该用户的 MCP Token>
+#    先调 nodes_context 拿 node_id，再带 node_id 调用具体工具。
+```
+
+注意：AgentDock 节点侧对 endpoint 的校验与 hub 一致——`http://` 只接受 localhost 或 IP 地址，所以测试期必须用 `http://<IP>:8787` 形态，不能写内网主机名。
+
+**迁移到 HTTPS 生产站点**：
+
+```bash
+# 1. 停服务，改环境变量为 https 域名（反代已终结 TLS 并指向 HUB_LISTEN）
+HUB_DATA_DIR=/var/lib/agenthub HUB_PUBLIC_URL=https://hub.example.com \
+  HUB_LISTEN=127.0.0.1:8787 ./agenthub serve
+
+# 2. Web 界面与平台侧 MCP endpoint 立即变为新地址；
+# 3. 测试期配对的节点若也要切换，在界面删除节点 → 用新域名重新配对：
+agentdock nexus pair --endpoint https://hub.example.com --code <新配对码>
+```
+
+数据目录沿用同一个 `HUB_DATA_DIR` 即可保留账号与节点记录；如果想从干净环境开始，换一个新的 `HUB_DATA_DIR` 重新 `admin init`。
 
 ### 备份
 

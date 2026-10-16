@@ -6,6 +6,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,12 +83,38 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Listen) == "" {
 		return errors.New("listen address is empty")
 	}
-	if !strings.HasPrefix(c.PublicURL, "https://") {
-		// 节点侧 AgentDock 会基于 PublicURL 推导 wss 回调地址，
-		// 非 https 公网地址会造成明文出站或无法回连，启动期直接拒绝。
-		return errors.New("HUB_PUBLIC_URL must be an https:// origin (TLS is terminated by the reverse proxy)")
+	return ValidatePublicURL(c.PublicURL)
+}
+
+// ValidatePublicURL 校验 HUB_PUBLIC_URL 形态。
+// 生产环境必须是 https origin（TLS 由反代终结）；本机/局域网测试允许
+// http://localhost 或 http://<局域网IP>——与 AgentDock 节点侧
+// normalizeEndpoint 的规则对齐（节点侧本就允许 http+IP/loopback 配对），
+// 否则"先用 IP 测试、再迁 HTTPS"的路径走不通。
+func ValidatePublicURL(publicURL string) error {
+	if publicURL == "" {
+		return errors.New("HUB_PUBLIC_URL is required (e.g. https://hub.example.com or http://192.168.1.10:8787 for LAN testing)")
 	}
-	return nil
+	parsed, err := url.Parse(publicURL)
+	if err != nil || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("HUB_PUBLIC_URL must be a bare origin (scheme://host[:port], no path/query)")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		host := parsed.Hostname()
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+			// 局域网 IP：允许，用于反代就位前的测试。
+			return nil
+		}
+		return errors.New("HUB_PUBLIC_URL with http:// is only allowed for localhost or an IP address; public hostnames must use https://")
+	default:
+		return errors.New("HUB_PUBLIC_URL scheme must be https:// (or http:// with localhost/IP for testing)")
+	}
 }
 
 // ControlDBPath 返回控制库文件路径（DataDir 下单文件）。
