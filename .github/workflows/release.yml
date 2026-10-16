@@ -151,11 +151,13 @@ jobs:
             for TAG in $TAGS; do
               PER_ARCH_TAGS="$PER_ARCH_TAGS -t $IMAGE-$ARCH"
             done
-            OUT=$(docker buildx build \
+            docker buildx build \
               --platform "linux/$ARCH" \
               --build-arg "BIN_NAME=bin/agenthub-linux-$ARCH" \
-              --push $PER_ARCH_TAGS .)
-            DIGEST=$(echo "$OUT" | grep -oE 'sha256:[a-f0-9]{64}' | tail -1)
+              --push $PER_ARCH_TAGS .
+            # 从已推送的 per-arch manifest 解析 digest（stdout 抓取不可靠）
+            DIGEST=$(docker buildx imagetools inspect "$IMAGE-$ARCH" --raw \
+              | openssl dgst -sha256 -binary | openssl base64 -A | sed 's/^/sha256:/')
             DIGESTS="$DIGESTS $IMAGE-$ARCH@$DIGEST"
             echo "$ARCH digest: $DIGEST"
           done
