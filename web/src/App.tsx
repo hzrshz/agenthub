@@ -96,16 +96,28 @@ export function App() {
 function ChangePassword({ onDone }: { onDone: () => void }) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
+  // 两次输入不一致时即时提示；一致或都为空时不显示。
+  const mismatch = confirm !== "" && confirm !== next;
   return (
     <div className="pw-wrap">
       <div className="card" data-panel="AUTH/RESET">
         <h2><KeyRound size={16} />首次登录，请修改密码</h2>
         <input type="password" placeholder="当前密码" value={current} onChange={(e) => setCurrent(e.target.value)} />
         <input type="password" placeholder="新密码（至少 12 字符）" value={next} onChange={(e) => setNext(e.target.value)} />
+        <input
+          type="password"
+          placeholder="确认新密码"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+          style={{ borderColor: mismatch ? "var(--danger)" : undefined }}
+        />
+        {mismatch && <p className="error">两次输入的新密码不一致</p>}
         {error && <p className="error">{error}</p>}
         <button
           className="primary"
+          disabled={mismatch || !current || !next}
           onClick={async () => {
             try {
               await api.post("/v1/auth/password", { current_password: current, new_password: next });
