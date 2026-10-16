@@ -88,26 +88,33 @@ jobs:
           name: agenthub-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
 
-  # 多架构容器镜像：amd64/arm64 由原生 runner + QEMU 覆盖 loong64/riscv64。
-  # go-sdk/modernc 全部纯 Go，QEMU 下 go build 慢但可行；web 产物单次构建复用。
+  # 多架构容器镜像：装配方言——二进制来自 binaries 矩阵产物，
+  # scratch 运行层 + per-arch 构建推 + imagetools 组合 manifest，
+  # 彻底绕开官方基础镜像不发布 loong64 的限制。
   image:
+    needs: binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # go:embed 需要 web_dist 就位；在 docker build 前重建保证与源码一致。
-      - uses: actions/setup-node@v4
+      # 装配方言：二进制来自 binaries 矩阵产物（Go 原生编译，覆盖全部架构），
+      # 镜像内不再编译——绕开官方基础镜像不发布 loong64 的限制。
+      - name: Download binaries
+        uses: actions/download-artifact@v4
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
+          pattern: agenthub-linux-*
+          merge-multiple: true
+          path: bin
 
-      - name: Build web bundle
-        run: make web
-
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64,loong64,riscv64
+      # scratch 运行层的两件运行时依赖（架构无关），从官方 golang 镜像导出。
+      - name: Prepare runtime certs and tzdata
+        run: |
+          mkdir -p certs
+          docker create --name tz golang:1.26 true
+          docker cp tz:/etc/ssl/certs/ca-certificates.crt certs/ca-certificates.crt
+          docker cp tz:/usr/local/go/lib/time/zoneinfo.zip certs/zoneinfo.zip
+          docker rm -f tz
+          ls -la bin certs
 
       - uses: docker/setup-buildx-action@v3
 
@@ -130,28 +137,51 @@ jobs:
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha,prefix=sha-,enable=${{ !startsWith(github.ref, 'refs/tags/v') }}
 
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64,linux/loong64,linux/riscv64
-          push: true
-          build-args: |
-            VERSION=${{ startsWith(github.ref, 'refs/tags/v') && format('{0}', github.ref_name) || 'dev' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # scratch 装配架构无关，但 COPY 的二进制按平台不同：buildx 多平台
+      # 一次构建需要镜像内编译（被基础镜像缺失挡死），因此按平台分次构建
+      # 推 per-arch tag，再收集 digest 用 imagetools 组合多架构 manifest。
+      - name: Build and push per-arch images
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          DIGESTS=""
+          for ARCH in amd64 arm64 loong64 riscv64; do
+            OUT=$(docker buildx build \
+              --platform "linux/$ARCH" \
+              --build-arg "BIN_NAME=bin/agenthub-linux-$ARCH" \
+              --push $(echo "${{ steps.meta.outputs.tags }}" | tr '\n' ' ' | sed "s|$IMAGE|$IMAGE-$ARCH|g") .)
+            # --push 模式从 stdout 抓 digest（最后一行 sha256:...）
+            DIGEST=$(echo "$OUT" | grep -oE 'sha256:[a-f0-9]{64}' | tail -1)
+            DIGESTS="$DIGESTS $IMAGE-$ARCH@$DIGEST"
+            echo "$ARCH digest: $DIGEST"
+          done
+          echo "DIGESTS=$DIGESTS" >> "$GITHUB_ENV"
+
+      - name: Create multi-arch manifest
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          for t in $(echo "${{ steps.meta.outputs.tags }}" | tr '\n' ' '); do
+            docker buildx imagetools create -t "$t" ${{ env.DIGESTS }}
+          done
+          docker buildx imagetools inspect "$IMAGE:latest" | head -20
 
   release:
     needs: binaries
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      # download-artifact 连续两跑在重试 5 次后瞬时失败；
+      # 改用 gh run download 包在 nick-fields/retry 里（3 次尝试，间隔 30s）。
+      - name: Download artifacts (with retry)
+        uses: nick-fields/retry@v3
         with:
-          merge-multiple: true
-          path: dist/
+          max_attempts: 3
+          retry_wait_seconds: 30
+          timeout_seconds: 600
+          command: |
+            mkdir -p dist
+            gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
+              --pattern "agenthub-linux-*" --dir dist
+            ls -la dist
 
       - name: Checksums
         run: |

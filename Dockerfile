@@ -1,42 +1,34 @@
-# AgentHub 容器镜像：多阶段构建。
-# 产物为静态链接二进制（纯 Go 栈，CGO_ENABLED=0），运行层用 alpine
-# （全架构官方镜像，含 loong64 之外的国产化目标）；国产化架构
-# （arm64/loong64/riscv64）由 release workflow 的 docker/build-push-action 扩展。
-#
-# web 产物不进镜像构建：node:22-alpine 没有 loong64/riscv64 官方镜像，
-# 且前端产物对全架构完全相同。构建顺序固定为：
-#   make web  →  internal/httpx/web_dist 就位  →  docker build（go:embed 直接吃）
-# 本地/CI 都在 docker build 之前执行 make web。
+# AgentHub 容器镜像：装配方言——静态二进制来自构建上下文（不在镜像内编译）。
+# 原因：Docker Hub 官方库（golang/alpine/node）全都不发布 loong64，
+# 任何基于官方基础镜像的多架构编译在 loong64 上都解析失败；
+# 而二进制由 Go 原生编译（make ci / release binaries job）覆盖全部架构。
+#   CI 路径：release.yml image job 先下载 binaries 矩阵产物，再 docker build；
+#   本地路径：make release-linux 产出 dist/ 后执行 docker build。
+# 产物要求：构建上下文根下存在 bin/agenthub-<os>-<arch>[.exe]（CI 装配），
+#   或单架构本地构建时用 build-arg BIN_NAME 指定（默认 bin/agenthub-linux-amd64）。
 
-# 编译层用 golang:1.26（debian 系，官方发布全架构含 loong64/riscv64）；
-# golang:1.26-alpine 缺少这两个国产化架构变体。产物是 CGO_ENABLED=0
-# 静态二进制，与编译基础镜像的 libc 无关，运行层仍用 alpine。
-FROM golang:1.26 AS build
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
-    -ldflags "-s -w -X main.version=${VERSION}" \
-    -o /out/agenthub ./cmd/agenthub
+ARG BIN_NAME=bin/agenthub-linux-amd64
 
-# 运行层选 alpine 而非 distroless：distroless 不发布 loong64/riscv64，
-# 多架构国产化镜像必须用有全架构官方支持的基础镜像。
-# 产物是 CGO_ENABLED=0 静态二进制，alpine 的 musl 不参与链接，行为一致。
-FROM alpine:3.20
-# 时区数据：界面/日志按本地时区展示。
-COPY --from=build /usr/local/go/lib/time/zoneinfo.zip /zoneinfo.zip
+# 运行层用 scratch：静态二进制不依赖任何 libc/基础系统，scratch 架构无关。
+# 手工装配两件运行时依赖（都来自官方发行物，架构无关）：
+#   - CA 证书（HTTPS 出站）——由 CI 从 build 阶段导出或本地准备
+#   - 时区数据
+# 本地构建时需要 bin/ca-certificates.crt + bin/zoneinfo.zip（make release-linux 产出）。
+FROM scratch
+# ARG 在 FROM 前声明后，必须在阶段内重新声明才能被 COPY 引用。
+ARG BIN_NAME
+COPY ${BIN_NAME} /agenthub
+COPY certs/ca-certificates.crt /etc/ssl/certs/
+COPY certs/zoneinfo.zip /zoneinfo.zip
 ENV TZ=Asia/Shanghai \
     ZONEINFO=/zoneinfo.zip
-COPY --from=build /out/agenthub /agenthub
 # 数据目录（SQLite 单文件）以卷挂载持久化。
 # 容器内必须监听 0.0.0.0 才能被端口映射访问（默认 127.0.0.1 仅本机）。
+# scratch 无用户数据库，65534 是通用 nobody UID/GID。
 VOLUME ["/data"]
 ENV HUB_DATA_DIR=/data \
     HUB_LISTEN=0.0.0.0:8787
 EXPOSE 8787
-# 非 root 运行（alpine 内置 nobody）。
-USER nobody
+USER 65534:65534
 ENTRYPOINT ["/agenthub"]
 CMD ["serve"]

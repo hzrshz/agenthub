@@ -40,3 +40,14 @@ release-linux:
 		-o dist/agenthub-linux-$$arch ./cmd/agenthub || exit 1; \
 	done
 	@cd dist && shasum -a 256 agenthub-* > checksums.txt && ls -la
+
+# docker-image: 本地装配方言镜像构建（单架构，默认当前平台）
+# 依赖 dist/agenthub-linux-<arch> 与 certs/（都由 release-linux 产出）
+release-image:
+	mkdir -p certs
+	docker create --name tz-tmp golang:1.26 true >/dev/null
+	docker cp tz-tmp:/etc/ssl/certs/ca-certificates.crt certs/ca-certificates.crt
+	docker cp tz-tmp:/usr/local/go/lib/time/zoneinfo.zip certs/zoneinfo.zip
+	docker rm -f tz-tmp >/dev/null
+	mkdir -p bin && cp dist/agenthub-linux-$(ARCH) bin/agenthub-linux-$(ARCH)
+	docker build --build-arg BIN_NAME=bin/agenthub-linux-$(ARCH) -t agenthub-local .
