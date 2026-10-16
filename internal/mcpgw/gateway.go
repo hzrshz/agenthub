@@ -104,8 +104,14 @@ func (g *Gateway) handlerWithServer(server *mcp.Server) http.Handler {
 	return mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{
-			Stateless:                    true,
-			JSONResponse:                 true,
+			Stateless:    true,
+			JSONResponse: true,
+			// hub 不是 localhost 本地服务：部署形态是反代之后、监听 127.0.0.1，
+			// Host 头是反代/客户端使用的 IP 或域名。SDK 的 DNS rebinding 防护
+			// 在"监听回环 + Host 非回环"时一律 403，会把所有经反代的访问全部
+			// 拦下（实测 Cherry Studio 报 Forbidden: invalid Host header）。
+			// hub 的访问控制完全由 Bearer token + 限流承担，故关闭该防护。
+			DisableLocalhostProtection:   true,
 			MaxRequestBodyBytes:          config.MaxMessageBytes,
 			PropagateRequestCancellation: true,
 		},
