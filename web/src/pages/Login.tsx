@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ArrowRight, Terminal } from "lucide-react";
 import { api, setCSRF } from "../api";
 
 export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
@@ -9,16 +10,38 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
   return (
     <div className="login-wrap">
-      <div className="card narrow">
-        <h1>AgentHub</h1>
-        <p className="muted">多用户 AgentDock 汇聚网关</p>
-        <input placeholder="用户名（邮箱形态）" value={username} onChange={(e) => setUsername(e.target.value)} />
-        <input type="password" placeholder="密码" value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && void submit()} />
-        {error && <p className="error">{error}</p>}
-        <button disabled={busy} onClick={() => void submit()}>{busy ? "登录中…" : "登录"}</button>
+      <div className="login-hero" aria-hidden>
+        <span className="giant">AGENT</span>
+        <span className="giant filled">HUB_</span>
       </div>
+      <div className="login-meta">AGENTDOCK MULTI-TENANT GATEWAY / V1</div>
+      <form
+        className="login-card"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        <h1>登录</h1>
+        <p className="sub"><Terminal size={13} style={{ verticalAlign: -2 }} /> AUTH / AGENTHUB</p>
+        <input
+          placeholder="用户名（邮箱形态）"
+          autoComplete="username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+        <input
+          type="password"
+          placeholder="密码"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        {error && <p className="error">{error}</p>}
+        <button className="primary" type="submit" disabled={busy}>
+          {busy ? "验证中" : "进入"}<ArrowRight size={15} />
+        </button>
+      </form>
     </div>
   );
 

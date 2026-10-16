@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
+import { ScrollText } from "lucide-react";
 import { api } from "../api";
-import { Pagination, PageMeta } from "../components/Pagination";
+import { Pagination, PageMeta, FilterBar } from "../components/Pagination";
 
 interface InvokeLog {
   id: string;
@@ -21,13 +22,12 @@ interface InvokePage {
   total: number;
 }
 
-const OUTCOMES = [
-  { value: "", label: "全部结果" },
-  { value: "success", label: "成功" },
-  { value: "error", label: "失败" },
-  { value: "timeout", label: "超时" },
-  { value: "cancelled", label: "已取消" },
-];
+const OUTCOME_LABEL: Record<string, string> = {
+  success: "成功",
+  error: "失败",
+  timeout: "超时",
+  cancelled: "已取消",
+};
 
 export function Invokes({ admin = false }: { admin?: boolean }) {
   const [logs, setLogs] = useState<InvokeLog[]>([]);
@@ -60,53 +60,35 @@ export function Invokes({ admin = false }: { admin?: boolean }) {
     return () => clearInterval(timer);
   }, [load]);
 
-  const gotoPage = (page: number) => setMeta((m) => ({ ...m, page }));
-  const setPerPage = (perPage: number) => setMeta((m) => ({ ...m, per_page: perPage, page: 1 }));
+  const hasFilter = Boolean(tool || outcome);
+  const reset = () => {
+    setTool("");
+    setToolInput("");
+    setOutcome("");
+    setMeta((m) => ({ ...m, page: 1 }));
+  };
 
   return (
-    <div className="card">
-      <h2>{admin ? "全局调用流水" : "调用记录"}</h2>
-      <p className="muted">仅记录时间、节点、工具、结果与耗时；工具参数与返回内容不落库。</p>
-      <div className="filter-row">
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            setTool(toolInput.trim());
-            setMeta((m) => ({ ...m, page: 1 }));
-          }}
-        >
-          <input
-            placeholder="按工具名过滤（前缀）"
-            value={toolInput}
-            onChange={(e) => setToolInput(e.target.value)}
-          />
-          <button type="submit">查询</button>
-          {(tool || outcome) && (
-            <button
-              type="button"
-              onClick={() => {
-                setTool("");
-                setToolInput("");
-                setOutcome("");
-                setMeta((m) => ({ ...m, page: 1 }));
-              }}
-            >
-              重置
-            </button>
-          )}
-        </form>
-        <select
-          value={outcome}
-          onChange={(e) => {
-            setOutcome(e.target.value);
-            setMeta((m) => ({ ...m, page: 1 }));
-          }}
-        >
-          {OUTCOMES.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </select>
-      </div>
+    <div className="card" data-panel={admin ? "ADMIN/INVOKES" : "USER/INVOKES"}>
+      <h2><ScrollText size={16} />{admin ? "全局调用流水" : "调用记录"}</h2>
+      <p className="muted" style={{ marginBottom: 10 }}>
+        仅记录时间、节点、工具、结果与耗时；工具参数与返回内容不落库。
+      </p>
+      <FilterBar
+        toolInput={toolInput}
+        setToolInput={setToolInput}
+        onSearch={() => {
+          setTool(toolInput.trim());
+          setMeta((m) => ({ ...m, page: 1 }));
+        }}
+        onReset={reset}
+        outcome={outcome}
+        setOutcome={(v) => {
+          setOutcome(v);
+          setMeta((m) => ({ ...m, page: 1 }));
+        }}
+        hasFilter={hasFilter}
+      />
       {error && <p className="error">{error}</p>}
       <table>
         <thead>
@@ -123,35 +105,27 @@ export function Invokes({ admin = false }: { admin?: boolean }) {
         <tbody>
           {logs.map((log) => (
             <tr key={log.id}>
-              <td>{new Date(log.occurred_at).toLocaleString()}</td>
+              <td style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>
+                {new Date(log.occurred_at).toLocaleString()}
+              </td>
               {admin && <td>{log.username || <code>{log.user_id.slice(0, 12)}…</code>}</td>}
               <td><code>{log.node_id.slice(0, 16)}…</code></td>
-              <td>{log.tool_name}</td>
-              <td><span className={`outcome-${log.outcome}`}>{outcomeLabel(log.outcome)}</span></td>
-              <td>{log.duration_ms} ms</td>
-              <td>{log.error_code || "—"}</td>
+              <td style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>{log.tool_name}</td>
+              <td><span className={`outcome-${log.outcome} status-chip`}><span className={`status-dot ${log.outcome === "success" ? "online" : log.outcome === "error" ? "offline" : "disabled"}`} />{OUTCOME_LABEL[log.outcome] ?? log.outcome}</span></td>
+              <td style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>{log.duration_ms} ms</td>
+              <td className="muted">{log.error_code || "—"}</td>
             </tr>
           ))}
           {logs.length === 0 && (
-            <tr><td colSpan={admin ? 7 : 6}>暂无调用记录。</td></tr>
+            <tr><td colSpan={admin ? 7 : 6} className="muted">暂无调用记录。</td></tr>
           )}
         </tbody>
       </table>
       <Pagination
         meta={meta}
-        onPage={gotoPage}
-        onPerPage={setPerPage}
+        onPage={(page) => setMeta((m) => ({ ...m, page }))}
+        onPerPage={(per_page) => setMeta((m) => ({ ...m, per_page, page: 1 }))}
       />
     </div>
   );
-}
-
-function outcomeLabel(outcome: string): string {
-  switch (outcome) {
-    case "success": return "成功";
-    case "error": return "失败";
-    case "timeout": return "超时";
-    case "cancelled": return "已取消";
-    default: return outcome;
-  }
 }

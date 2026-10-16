@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { UserPlus, Ban, CirclePlay, KeyRound, ShieldCheck } from "lucide-react";
 import { api } from "../api";
 
 interface User {
@@ -76,17 +77,30 @@ export function AdminUsers() {
   };
 
   return (
-    <div className="card">
-      <h2>用户管理</h2>
+    <div className="card" data-panel="ADMIN/USERS">
+      <h2><ShieldCheck size={16} />用户管理</h2>
       <div className="create-row">
-        <input placeholder="用户名（邮箱形态）" value={newUsername} onChange={(e) => setNewUsername(e.target.value)} />
-        <input placeholder="初始密码（至少 12 字符）" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
-        <button onClick={() => void create()}>创建用户</button>
+        <input
+          placeholder="用户名（邮箱形态）"
+          style={{ width: 240 }}
+          value={newUsername}
+          onChange={(e) => setNewUsername(e.target.value)}
+        />
+        <input
+          placeholder="初始密码（至少 12 字符）"
+          style={{ width: 240 }}
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+        />
+        <button className="primary" onClick={() => void create()}>
+          <UserPlus size={14} />创建用户
+        </button>
       </div>
       {created && (
         <div className="token-result">
-          <p>用户已创建。MCP Token（仅显示一次）：<code>{created.token}</code></p>
-          <p className="muted">MCP endpoint：<code>{created.endpoint}</code></p>
+          <p>用户已创建。MCP Token（仅显示一次）：</p>
+          <code>{created.token}</code>
+          <p className="muted" style={{ marginTop: 8 }}>MCP endpoint：<code>{created.endpoint}</code></p>
         </div>
       )}
       {error && <p className="error">{error}</p>}
@@ -97,16 +111,31 @@ export function AdminUsers() {
         <tbody>
           {users.map((user) => (
             <tr key={user.id}>
-              <td>{user.username}</td>
-              <td>{user.role === "admin" ? "管理员" : "用户"}</td>
-              <td>{user.status === "active" ? "正常" : "已禁用"}</td>
-              <td>{user.must_change_password ? "是" : "否"}</td>
-              <td>{new Date(user.created_at).toLocaleDateString()}</td>
+              <td style={{ fontWeight: 500 }}>{user.username}</td>
               <td>
-                {user.status === "active"
-                  ? <button onClick={() => void disable(user.id)}>禁用</button>
-                  : <button onClick={() => void enable(user.id)}>启用</button>}
-                <button onClick={() => void resetPassword(user.id)}>重置密码</button>
+                <span className="status-chip">
+                  {user.role === "admin" ? (
+                    <><span className="status-dot online" />管理员</>
+                  ) : (
+                    <><span className="status-dot offline" />用户</>
+                  )}
+                </span>
+              </td>
+              <td>
+                <span className="status-chip">
+                  <span className={`status-dot ${user.status === "active" ? "online" : "disabled"}`} />
+                  {user.status === "active" ? "正常" : "已禁用"}
+                </span>
+              </td>
+              <td className="muted">{user.must_change_password ? "是" : "否"}</td>
+              <td className="muted">{new Date(user.created_at).toLocaleDateString()}</td>
+              <td>
+                {user.status === "active" ? (
+                  <button onClick={() => void disable(user.id)}><Ban size={13} />禁用</button>
+                ) : (
+                  <button onClick={() => void enable(user.id)}><CirclePlay size={13} />启用</button>
+                )}
+                <button onClick={() => void resetPassword(user.id)}><KeyRound size={13} />重置密码</button>
               </td>
             </tr>
           ))}

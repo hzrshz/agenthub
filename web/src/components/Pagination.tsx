@@ -1,5 +1,5 @@
-// 通用分页条：页码、跳页、每页条数。
-// 服务端分页契约：{ items, page, per_page, total }（与后端 audit.InvokePage 对齐）。
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from "lucide-react";
+
 export interface PageMeta {
   page: number;
   per_page: number;
@@ -35,12 +35,12 @@ export function Pagination({
 
   return (
     <div className="pagination">
-      <span className="muted">
-        第 {from}-{to} 条 / 共 {meta.total} 条
+      <span className="info">
+        {from}–{to} / {meta.total} RECORDS
       </span>
       <span className="pager">
-        <button disabled={current <= 1} onClick={() => onPage(1)}>«</button>
-        <button disabled={current <= 1} onClick={() => onPage(current - 1)}>‹</button>
+        <button disabled={current <= 1} onClick={() => onPage(1)} aria-label="第一页"><ChevronsLeft size={13} /></button>
+        <button disabled={current <= 1} onClick={() => onPage(current - 1)} aria-label="上一页"><ChevronLeft size={13} /></button>
         {pages.map((p, i) =>
           p === "…" ? (
             <span key={`e${i}`} className="ellipsis">…</span>
@@ -50,11 +50,11 @@ export function Pagination({
             </button>
           ),
         )}
-        <button disabled={current >= totalPages} onClick={() => onPage(current + 1)}>›</button>
-        <button disabled={current >= totalPages} onClick={() => onPage(totalPages)}>»</button>
+        <button disabled={current >= totalPages} onClick={() => onPage(current + 1)} aria-label="下一页"><ChevronRight size={13} /></button>
+        <button disabled={current >= totalPages} onClick={() => onPage(totalPages)} aria-label="最后一页"><ChevronsRight size={13} /></button>
       </span>
       <span className="jump">
-        跳至
+        PAGE
         <input
           type="number"
           min={1}
@@ -72,15 +72,59 @@ export function Pagination({
             if (v >= 1 && v <= totalPages && v !== current) onPage(v);
           }}
         />
-        页
+        / {totalPages}
       </span>
       {onPerPage && (
         <select value={meta.per_page} onChange={(e) => onPerPage(parseInt(e.target.value, 10))}>
           {[20, 50, 100].map((n) => (
-            <option key={n} value={n}>{n} 条/页</option>
+            <option key={n} value={n}>{n} / 页</option>
           ))}
         </select>
       )}
+    </div>
+  );
+}
+
+// FilterBar：调用记录页的筛选行（工具名 + 结果下拉）。
+import { Search, RotateCcw } from "lucide-react";
+
+export function FilterBar({
+  toolInput,
+  setToolInput,
+  onSearch,
+  onReset,
+  outcome,
+  setOutcome,
+  hasFilter,
+}: {
+  toolInput: string;
+  setToolInput: (v: string) => void;
+  onSearch: () => void;
+  onReset: () => void;
+  outcome: string;
+  setOutcome: (v: string) => void;
+  hasFilter: boolean;
+}) {
+  return (
+    <div className="filter-row">
+      <form onSubmit={(e) => { e.preventDefault(); onSearch(); }}>
+        <input
+          placeholder="按工具名过滤（前缀匹配）"
+          value={toolInput}
+          onChange={(e) => setToolInput(e.target.value)}
+        />
+        <button type="submit"><Search size={13} />查询</button>
+        {hasFilter && (
+          <button type="button" onClick={onReset}><RotateCcw size={13} />重置</button>
+        )}
+      </form>
+      <select value={outcome} onChange={(e) => setOutcome(e.target.value)}>
+        <option value="">全部结果</option>
+        <option value="success">成功</option>
+        <option value="error">失败</option>
+        <option value="timeout">超时</option>
+        <option value="cancelled">已取消</option>
+      </select>
     </div>
   );
 }
