@@ -8,9 +8,11 @@
 *.prof
 coverage.*
 # 本地构建的二进制（web_dist 嵌入产物按惯例入库，见 internal/httpx/web_dist/）
-agenthub
-agenthub-linux-*
+# 仅匹配仓库根目录的二进制文件名（前导 /），不影响 cmd/agenthub/ 源码目录
+/agenthub
+/agenthub-linux-*
 cmd/agenthub/agenthub
+cmd/agenthub/agenthub.exe
 
 # ===== 本地运行数据 =====
 # SQLite 控制库及临时文件
