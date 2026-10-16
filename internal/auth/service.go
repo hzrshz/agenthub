@@ -24,6 +24,7 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
+	"github.com/uvwt/agenthub/internal/config"
 	"github.com/uvwt/agenthub/internal/core"
 )
 
@@ -310,7 +311,7 @@ func (s *Service) createSession(ctx context.Context, userID, username, role stri
 		return IssuedSession{}, err
 	}
 	now := s.now().UTC()
-	expiresAt := now.Add(24 * time.Hour)
+	expiresAt := now.Add(config.WebSessionAbsoluteTTL)
 	session := Session{
 		ID: id, UserID: userID, Username: username, Role: role,
 		MustChangePassword: mustChange, AbsoluteExpiresAt: expiresAt,

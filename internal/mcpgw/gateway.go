@@ -93,7 +93,9 @@ func (g *Gateway) Handler() http.Handler {
 			writeMCPError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "assemble tool surface failed")
 			return
 		}
-		g.handlerWithServer(server).ServeHTTP(w, r.WithContext(mcpContextWithUser(r.Context(), user.ID)))
+		reqCtx := mcpContextWithUser(r.Context(), user.ID)
+		reqCtx = WithTraceparent(reqCtx, r.Header.Get("traceparent"))
+		g.handlerWithServer(server).ServeHTTP(w, r.WithContext(reqCtx))
 	})
 }
 

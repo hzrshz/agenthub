@@ -30,13 +30,14 @@ const (
 
 // Server 是 HTTP 层的依赖容器。
 type Server struct {
-	auth    *auth.Service
-	nodes   *nodes.Store
-	hub     *bridge.Hub
-	gateway MCPGateway
-	invokes InvokeLister
-	public  string // PublicURL，用于给用户展示 MCP endpoint
-	mux     *http.ServeMux
+	auth        *auth.Service
+	nodes       *nodes.Store
+	hub         *bridge.Hub
+	gateway     MCPGateway
+	invokes     InvokeLister
+	pairLimiter *pairRateLimiter
+	public      string // PublicURL，用于给用户展示 MCP endpoint
+	mux         *http.ServeMux
 }
 
 // MCPGateway 是 /mcp 挂载所需的最小网关接口（避免 httpx 反向依赖 mcpgw）。
@@ -52,7 +53,7 @@ type InvokeLister interface {
 }
 
 func NewServer(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, gateway MCPGateway, invokes InvokeLister, publicURL string) *Server {
-	s := &Server{auth: authService, nodes: nodeStore, hub: hub, gateway: gateway, invokes: invokes, public: publicURL, mux: http.NewServeMux()}
+	s := &Server{auth: authService, nodes: nodeStore, hub: hub, gateway: gateway, invokes: invokes, pairLimiter: newPairRateLimiter(), public: publicURL, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -92,7 +93,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/nodes/{id}", s.requireSession(s.handleDeleteNode))
 
 	// 节点侧（AgentDock 出站，无会话，配对码/device token 认证）
-	s.mux.HandleFunc("POST "+protocol.PairPath, s.handleNodePair)
+	s.mux.HandleFunc("POST "+protocol.PairPath, s.pairLimiter.middleware(s.handleNodePair))
 	s.mux.HandleFunc("GET "+protocol.ConnectPath, s.handleNodeConnect)
 
 	// 平台侧 MCP（Bearer MCP Token 即身份，网关内部完成认证与限流）
