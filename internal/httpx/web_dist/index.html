@@ -3,9 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      自托管字体：内网/国产化交付不能依赖 fonts.googleapis.com（外链会触发
+      外网 DNS 解析，阻塞渲染并泄露客户端 IP，静默失败还会掉回系统字体）。
+      字体文件随 web_dist 一起由 go:embed 打进单二进制，运行时零外网依赖。
+      放在主样式表之前声明，保证字体尽早就绪、减少首屏字体跳变。
+    -->
+    <link rel="preload" href="/fonts/fonts.css" as="style" />
+    <link rel="stylesheet" href="/fonts/fonts.css" />
     <title>AgentHub</title>
-    <script type="module" crossorigin src="/assets/index-DV4aZBXI.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CdSyH178.css">
+    <script type="module" crossorigin src="/assets/index-DFhQn8eD.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-Cc4Aej97.css">
   </head>
   <body>
     <div id="root"></div>
