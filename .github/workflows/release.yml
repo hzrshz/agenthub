@@ -145,28 +145,35 @@ jobs:
       - name: Build and push per-arch images
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          # per-arch 中间 tag 统一基于第一个 tag 派生（只推一份中间 tag，
+          # 最终用户可见的 tag 由下面的 imagetools create 生成）。
+          #
+          # 关键：推送用的 tag 与后面 digest 引用的 tag 必须来自**同一个字符串**。
+          # 之前两处各自推导（推送用 ${TAG}-${ARCH}、引用用 ${IMAGE}-${ARCH}），
+          # 拼出来的是两个不同引用，imagetools create 直接报 "not found"。
+          # 这里把 repo / version 拆开后只拼一次，PER_ARCH_REF 即引用来源。
+          BASE_TAG=$(echo $TAGS | cut -d' ' -f1)
+          REPO="${BASE_TAG%:*}"
+          VERSION="${BASE_TAG##*:}"
           DIGESTS=""
           for ARCH in amd64 arm64 loong64 riscv64; do
-            # per-arch 中间 tag 必须带版本，否则每次发版都覆盖同一个
-            # 无版本 tag（agenthub-amd64），多版本并存时调试会抓错镜像。
-            PER_ARCH_TAGS=""
-            for TAG in $TAGS; do
-              PER_ARCH_TAGS="$PER_ARCH_TAGS -t ${TAG}-${ARCH}"
-            done
+            PER_ARCH_REF="${REPO}:${VERSION}-${ARCH}"
             # buildx 的进度日志（含 pushing manifest）走 stderr，$() 需 2>&1 合并。
             OUT=$(docker buildx build \
               --platform "linux/$ARCH" \
               --build-arg "BIN_NAME=bin/agenthub-linux-$ARCH" \
               --provenance=false \
-              --push $PER_ARCH_TAGS . 2>&1)
+              --push -t "$PER_ARCH_REF" . 2>&1)
             # buildx --push 成功时最后一行是 "pushing manifest for <tag>@sha256:<hex>"，
             # 从中抓取 per-arch manifest 的 digest。
             DIGEST=$(echo "$OUT" | grep -oE 'pushing manifest for [^ ]+@sha256:[a-f0-9]{64}' | grep -oE 'sha256:[a-f0-9]{64}' | tail -1)
             if [ -z "$DIGEST" ]; then
-              echo "ERROR: could not capture manifest digest for $ARCH"; exit 1
+              echo "ERROR: could not capture manifest digest for $ARCH"
+              echo "$OUT" | tail -30
+              exit 1
             fi
-            DIGESTS="$DIGESTS ${IMAGE}-${ARCH}@$DIGEST"
-            echo "$ARCH digest: $DIGEST"
+            DIGESTS="$DIGESTS ${PER_ARCH_REF}@${DIGEST}"
+            echo "$ARCH -> ${PER_ARCH_REF}@${DIGEST}"
           done
           echo "DIGESTS=$DIGESTS" >> "$GITHUB_ENV"
 
