@@ -108,7 +108,18 @@ func (s *Server) SetLogger(logger *slog.Logger) {
 
 // Handler 返回最终处理器。安全响应头在最外层包，这样连"未匹配到任何路由"
 // 的 404 响应也带全套头——扫描器不会区分你返回的是 200 还是 404。
-func (s *Server) Handler() http.Handler { return securityHeaders(s.trustedProxies, s.mux) }
+// 来源 IP 也在这里注入上下文：后续所有审计记录（登录、改密、管理操作）
+// 都能自动带上来源 IP，无需逐个业务函数传参。
+func (s *Server) Handler() http.Handler {
+	return securityHeaders(s.trustedProxies, auditIPInjector(s.clientIP, s.mux))
+}
+
+// auditIPInjector 把请求来源 IP 放进上下文供审计使用。
+func auditIPInjector(clientIP func(*http.Request) string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(auth.WithAuditIP(r.Context(), clientIP(r))))
+	})
+}
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })

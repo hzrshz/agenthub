@@ -11,7 +11,7 @@ import (
 )
 
 // CurrentSchemaVersion 是当前程序对应的控制库 Schema 版本。
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 type schemaMigration struct {
 	version    int
@@ -136,6 +136,7 @@ var currentSchema = []string{
         REFERENCES published_tool_contracts(owner_user_id, tool_name) ON DELETE CASCADE
 )`,
 	// 审计：append-only，trigger 防改删。actor 用 type+id，与 nexusdock 一致。
+	// source_ip 记录来源 IP——等保二级审计要求能追溯"谁从哪台机器操作"。
 	`CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY,
     occurred_at TEXT NOT NULL,
@@ -145,10 +146,12 @@ var currentSchema = []string{
     object_type TEXT NOT NULL,
     object_id TEXT NOT NULL,
     result TEXT NOT NULL,
-    metadata_json TEXT NOT NULL DEFAULT '{}'
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    source_ip TEXT NOT NULL DEFAULT ''
 )`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_events_time ON audit_events(occurred_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_events_object ON audit_events(object_type, object_id, occurred_at DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_audit_events_source_ip ON audit_events(source_ip, occurred_at DESC)`,
 	`CREATE TRIGGER IF NOT EXISTS audit_events_no_update
 BEFORE UPDATE ON audit_events
 BEGIN
@@ -176,8 +179,25 @@ END`,
 	`CREATE INDEX IF NOT EXISTS idx_invoke_logs_time ON invoke_logs(occurred_at)`,
 }
 
-// v1 即初始版本；此表保持结构，未来变更追加新的 schemaMigration。
-var schemaMigrations = []schemaMigration{}
+// v1 即初始版本；v2 为审计表补充来源 IP。
+var schemaMigrations = []schemaMigration{
+	{
+		version: 2,
+		name:    "audit_source_ip",
+		statements: []string{
+			// 等保二级审计要求"记录访问者的源 IP"。此前 audit_events 没有任何
+			// 来源字段，登录成功/失败都无法追溯是哪台机器发起的——而 Login()
+			// 其实早就拿到了 ip（用于限流键），只是没写进审计。
+			//
+			// 新库不需要这条：currentSchema 里已包含该列。这里只处理已存在的库。
+			// 走 ALTER TABLE 而不是改 currentSchema，是因为已有库不会重建。
+			`ALTER TABLE audit_events ADD COLUMN source_ip TEXT NOT NULL DEFAULT ''`,
+			// 按来源 IP 检索审计记录（安全事件溯源时按 IP 过滤）。
+			`CREATE INDEX IF NOT EXISTS idx_audit_events_source_ip
+    ON audit_events(source_ip, occurred_at DESC)`,
+		},
+	},
+}
 
 // EnsureSchema 把控制库升级到 CurrentSchemaVersion，失败时启动流程必须中止。
 func EnsureSchema(ctx context.Context, db *sql.DB) error {

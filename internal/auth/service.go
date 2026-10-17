@@ -734,6 +734,27 @@ func (s *Service) decayIPFailures(ctx context.Context, ipKey string) {
 
 // ---- 审计 ----
 
+// WithAuditIP 把请求来源 IP 放入上下文，供后续审计记录使用。
+//
+// 用 context 而非给每个业务函数加 ip 参数：来源 IP 只对"有人从某台机器
+// 发起"的入口有意义（登录、改密、管理操作），而纯内部动作（签发
+// session、CLI 自举）没有来源。走 context 让"要不要记 IP"成为调用点的
+// 显式选择，而不必污染所有业务签名。
+//
+// key 与提取函数定义在 core，供 nodes 等其他域共用同一套。
+func WithAuditIP(ctx context.Context, ip string) context.Context {
+	return core.WithAuditIP(ctx, ip)
+}
+
+// auditIP 从上下文取来源 IP；没有则返回空串（审计记录仍会写入，只是不带 IP）。
+func auditIP(ctx context.Context) string {
+	return core.AuditSourceIP(ctx)
+}
+
+// recordAudit 写一条审计事件。
+//
+// source_ip 从上下文取（见 WithAuditIP）——等保二级要求审计能追溯来源 IP，
+// 而多数业务层函数并不关心 IP，从上下文取可避免为审计改动所有签名。
 func (s *Service) recordAudit(ctx context.Context, actorType, actorID, action, objectID, result string, metadata map[string]any) {
 	metadataJSON := "{}"
 	if metadata != nil {
@@ -742,9 +763,10 @@ func (s *Service) recordAudit(ctx context.Context, actorType, actorID, action, o
 		}
 	}
 	_, _ = s.db.ExecContext(ctx, `INSERT INTO audit_events(
-		id, occurred_at, actor_type, actor_id, action, object_type, object_id, result, metadata_json
-	) VALUES(?, ?, ?, ?, ?, 'account', ?, ?, ?)`,
-		mustID(), s.now().UTC().Format(time.RFC3339Nano), actorType, actorID, action, objectID, result, metadataJSON)
+		id, occurred_at, actor_type, actor_id, action, object_type, object_id, result, metadata_json, source_ip
+	) VALUES(?, ?, ?, ?, ?, 'account', ?, ?, ?, ?)`,
+		mustID(), s.now().UTC().Format(time.RFC3339Nano), actorType, actorID, action, objectID, result,
+		metadataJSON, auditIP(ctx))
 }
 
 func mustID() string {

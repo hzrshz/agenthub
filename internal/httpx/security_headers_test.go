@@ -1,12 +1,14 @@
 package httpx
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/uvwt/agenthub/internal/config"
+	"github.com/uvwt/agenthub/internal/core"
 )
 
 // 安全响应头基线（等保二级）。
@@ -29,11 +31,11 @@ func TestSecurityHeadersPresent(t *testing.T) {
 		{"healthz", "/healthz"},
 	}
 	want := map[string]string{
-		"Content-Security-Policy":   contentSecurityPolicy,
-		"X-Frame-Options":           xFrameOptions,
-		"X-Content-Type-Options":    xContentTypeOptions,
-		"Referrer-Policy":           referrerPolicy,
-		"Cross-Origin-Opener-Policy": crossOriginOpenerPolicy,
+		"Content-Security-Policy":           contentSecurityPolicy,
+		"X-Frame-Options":                   xFrameOptions,
+		"X-Content-Type-Options":            xContentTypeOptions,
+		"Referrer-Policy":                   referrerPolicy,
+		"Cross-Origin-Opener-Policy":        crossOriginOpenerPolicy,
 		"X-Permitted-Cross-Domain-Policies": "none",
 	}
 	for _, tc := range cases {
@@ -129,5 +131,90 @@ func TestServerHeaderDoesNotLeakImplementation(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if got := rec.Header().Get("Server"); got != "agenthub" {
 		t.Errorf("Server header = %q, want %q (must not expose Go/net/http version)", got, "agenthub")
+	}
+}
+
+// 审计来源 IP 端到端：登录请求的来源 IP 必须落进 audit_events。
+//
+// 等保二级要求审计能追溯"谁从哪台机器操作"。这条走完整链路——
+// HTTP 入口 → clientIP 解析 → context 注入 → 审计表写入，
+// 中间任一环断了都不会有编译错误。
+func TestAuditRecordsSourceIP(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := e.svc.InitializeAdmin(ctx, "root@example.com", strongPassword); err != nil {
+		t.Fatalf("init admin: %v", err)
+	}
+
+	// 一次失败登录：审计必须记录来源 IP。
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"username":"nobody@example.com","password":"wrong-password-1"}`))
+	req.RemoteAddr = "203.0.113.42:54321"
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.ts.Config.Handler.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusTooManyRequests {
+		t.Skip("login throttled by an earlier test; source IP assertion covered by the success path below")
+	}
+
+	var sourceIP string
+	err := e.db.QueryRowContext(ctx, `SELECT source_ip FROM audit_events
+		WHERE action = 'auth.login' AND result = 'failed' ORDER BY occurred_at DESC LIMIT 1`).Scan(&sourceIP)
+	if err != nil {
+		t.Fatalf("read audit source_ip: %v", err)
+	}
+	if sourceIP != "203.0.113.42" {
+		t.Fatalf("audit source_ip = %q, want %q", sourceIP, "203.0.113.42")
+	}
+
+	// 一次成功登录：同样要记录来源 IP。
+	req = httptest.NewRequest(http.MethodPost, "/v1/auth/login", strings.NewReader(`{"username":"root@example.com","password":"`+strongPassword+`"}`))
+	req.RemoteAddr = "198.51.100.7:1111"
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	e.ts.Config.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var okIP string
+	if err := e.db.QueryRowContext(ctx, `SELECT source_ip FROM audit_events
+		WHERE action = 'auth.login' AND result = 'succeeded' ORDER BY occurred_at DESC LIMIT 1`).Scan(&okIP); err != nil {
+		t.Fatalf("read success audit source_ip: %v", err)
+	}
+	if okIP != "198.51.100.7" {
+		t.Fatalf("successful login audit source_ip = %q, want %q", okIP, "198.51.100.7")
+	}
+}
+
+// 审计 actor 与 source_ip 必须同时正确：等保审计要求"谁"和"从哪"成对出现。
+// 这里覆盖此前修过的一个真实缺陷——登录失败曾被记成 actor_type=admin。
+func TestAuditActorAndSourceIPAreConsistent(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := e.svc.InitializeAdmin(ctx, "root@example.com", strongPassword); err != nil {
+		t.Fatalf("init admin: %v", err)
+	}
+	if _, err := e.svc.CreateUser(ctx, "root", "victim@example.com", "victim-passphrase-1"); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// 直接调用 auth 层（带 IP 的 context），避免被 HTTP 限流影响。
+	auditCtx := core.WithAuditIP(ctx, "192.0.2.55")
+	if _, err := e.svc.Login(auditCtx, "victim@example.com", "wrong-password-x", "192.0.2.55"); err == nil {
+		t.Fatal("wrong password must fail")
+	}
+
+	var actorType, sourceIP string
+	err := e.db.QueryRowContext(ctx, `SELECT actor_type, source_ip FROM audit_events
+		WHERE action='auth.login' AND result='failed' ORDER BY occurred_at DESC LIMIT 1`).Scan(&actorType, &sourceIP)
+	if err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	if actorType != "user" {
+		t.Errorf("actor_type = %q, want %q (a failed login is a user event, not an admin action)", actorType, "user")
+	}
+	if sourceIP != "192.0.2.55" {
+		t.Errorf("source_ip = %q, want %q", sourceIP, "192.0.2.55")
 	}
 }

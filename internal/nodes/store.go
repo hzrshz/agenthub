@@ -93,10 +93,20 @@ func (s *Store) recordAudit(ctx context.Context, actorType, actorID, action, obj
 	if err != nil {
 		return
 	}
+	// source_ip 从 auth 包注入的上下文取（与账号域审计同一来源），
+	// 空串表示该动作无网络来源（如 AgentDock 通过公网配对入口发起，
+	// 走的是另一条 context 链）。
 	_, _ = s.db.ExecContext(ctx, `INSERT INTO audit_events(
-		id, occurred_at, actor_type, actor_id, action, object_type, object_id, result, metadata_json
-	) VALUES(?, ?, ?, ?, ?, 'node', ?, 'succeeded', ?)`,
-		id, s.now().UTC().Format(time.RFC3339Nano), actorType, actorID, action, objectID, metadataJSON)
+		id, occurred_at, actor_type, actor_id, action, object_type, object_id, result, metadata_json, source_ip
+	) VALUES(?, ?, ?, ?, ?, 'node', ?, 'succeeded', ?, ?)`,
+		id, s.now().UTC().Format(time.RFC3339Nano), actorType, actorID, action, objectID,
+		metadataJSON, auditSourceIP(ctx))
+}
+
+// auditSourceIP 从上下文取来源 IP。放在本包而非直接依赖 auth 包，
+// 避免 nodes → auth 的反向依赖（auth 已依赖 core，nodes 也依赖 core）。
+func auditSourceIP(ctx context.Context) string {
+	return core.AuditSourceIP(ctx)
 }
 
 // CreatePairingCode 为指定用户生成一次性配对码；哈希落库、明文只返回一次。
