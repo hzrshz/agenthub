@@ -282,10 +282,13 @@ tbody tr:hover td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 .login-hero .giant.filled {
   color: var(--accent);
   -webkit-text-stroke: 0;
-  animation: hero-slide 1s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+  /* 位移从 80px 收敛到 24px、时长 1s → 0.6s。
+     80px 的横向滑动在首屏读起来就是"标题往右跳了一下"，与登录卡片的位移
+     叠加后整体更像抖动。装饰性文字不需要那么长的入场动画。 */
+  animation: hero-slide 0.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
 @keyframes hero-slide {
-  from { transform: translateX(-80px); opacity: 0; }
+  from { transform: translateX(-24px); opacity: 0; }
   to { transform: none; opacity: 1; }
 }
 .login-card {
@@ -296,7 +299,18 @@ tbody tr:hover td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
   backdrop-filter: blur(16px);
   border: 1px solid var(--line-strong);
   padding: 36px;
-  animation: card-in 0.8s 0.2s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+  /* 登录卡片只做淡入，不做位移。
+     原来复用 .modal 的 card-in（translateY(32px) → 0），实测登录框顶部会
+     从 237px 上移到 205px、历时约 1 秒——页面高度没变（720px），所以这不是
+     "内容撑开导致的跳动"，而是入场动画自身的位移，读起来就是"位置跳了一下"。
+     位移类入场动画适合点击后才出现的浮层（.modal），不适合首屏唯一的主体元素：
+     用户在动画结束前点输入框，落点与最终位置不一致。
+     这里保留轻微上浮（8px）作为层次感，但缩短到 0.35s——不再能被读成"跳动"。 */
+  animation: login-card-in 0.35s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+@keyframes login-card-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
 }
 @keyframes card-in {
   from { opacity: 0; transform: translateY(32px); }
