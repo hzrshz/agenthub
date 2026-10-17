@@ -1,0 +1,9 @@
+# 占位：Dockerfile 用 `COPY --chown=65534:65534 context/data/ /data` 把这个
+# 空目录复制进镜像并设置属主。
+#
+# 为什么不在 Dockerfile 里建目录：scratch 没有 shell 无法 mkdir，而用
+# busybox/alpine 之类的基础镜像建目录会引入外部 manifest——官方 tag 均不
+# 发布 loong64，会让国产化架构的镜像构建直接失败。
+#
+# 为什么不用 buildkit 的 COPY --chown 直接建目录：COPY 的源必须存在于构建
+# 上下文里，不能凭空创建路径。这个 .gitkeep 就是为了让该目录入库。
