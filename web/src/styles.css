@@ -20,6 +20,10 @@
   --ink: #f2f2f0;
   --ink-dim: #8a8a8e;
   --ink-faint: #55555a;
+  /* 首屏巨型字样的描边色。单独定义而非复用 --line-strong：后者是对比度
+     仅 1.47:1 的边框色，用它做大字描边几乎看不见（WCAG 对大字/图形要求
+     ≥3:1）。#7a7a83 对背景约 4.6:1，既清楚可读又仍是"弱于正文"的层次。 */
+  --hero-stroke: #7a7a83;
   --accent: #d8ff3e;          /* 主色：酸性荧光绿 */
   --accent-dim: rgba(216, 255, 62, 0.12);
   --accent-line: rgba(216, 255, 62, 0.35);
@@ -277,7 +281,9 @@ tbody tr:hover td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
   line-height: 0.88;
   letter-spacing: -0.04em;
   color: transparent;
-  -webkit-text-stroke: 1px var(--line-strong);
+  /* 描边宽度也影响可读性：1px 在 240px 的大字上视觉上极细，
+     且低对比度时几乎不可见。1.5px 在深色背景上不显脏，但可读性差别明显。 */
+  -webkit-text-stroke: 1.5px var(--hero-stroke);
 }
 .login-hero .giant.filled {
   color: var(--accent);
