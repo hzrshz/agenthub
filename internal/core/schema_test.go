@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -128,5 +130,79 @@ func TestEnsureSchemaRejectsNewerVersion(t *testing.T) {
 	}
 	if err := EnsureSchema(ctx, db); err == nil {
 		t.Fatal("newer schema version must be rejected")
+	}
+}
+
+// 控制库文件与数据目录权限必须收紧到 0600 / 0700。
+//
+// 基线检查项：控制库存着全部口令哈希、session/token 哈希与审计记录。
+// 默认 umask(022) 下新建文件是 0644、预建目录是 0755，同机其他用户可读。
+// 目录这条尤其容易被漏——MkdirAll 只对**新建**目录应用 mode，运维预先建好的
+// 数据目录不会被收紧。
+func TestControlDBFilePermissionsAreRestrictive(t *testing.T) {
+	ctx := context.Background()
+	// 模拟运维预先创建的 0755 数据目录（常见的部署姿势）。
+	dataDir := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Chmod(dataDir, 0o755); err != nil {
+		t.Fatalf("chmod to simulate pre-created dir: %v", err)
+	}
+
+	dbPath := filepath.Join(dataDir, "control.db")
+	db, err := OpenSQLite(ctx, dbPath, 2)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	if err := EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+
+	fileInfo, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat db: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Errorf("control.db permissions = %04o, want 0600", got)
+	}
+	dirInfo, err := os.Stat(dataDir)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Errorf("data directory permissions = %04o, want 0700", got)
+	}
+}
+
+// 已存在的宽松权限文件也会被收紧（处理历史遗留）。
+func TestControlDBPermissionsTightenExistingFile(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "control.db")
+	db, err := OpenSQLite(ctx, dbPath, 2)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	// 人为放宽，模拟历史遗留。
+	if err := os.Chmod(dbPath, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	_ = db.Close()
+
+	reopened, err := OpenSQLite(ctx, dbPath, 2)
+	if err != nil {
+		t.Fatalf("reopen sqlite: %v", err)
+	}
+	defer reopened.Close()
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("permissions after reopen = %04o, want 0600 (legacy loose modes must be tightened)", got)
 	}
 }

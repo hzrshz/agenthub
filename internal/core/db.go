@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -28,8 +29,17 @@ func OpenSQLite(ctx context.Context, path string, maxOpenConns int) (*sql.DB, er
 		if err != nil {
 			return nil, fmt.Errorf("resolve database path: %w", err)
 		}
-		if err := os.MkdirAll(filepath.Dir(absolute), 0o700); err != nil {
+		dataDir := filepath.Dir(absolute)
+		if err := os.MkdirAll(dataDir, 0o700); err != nil {
 			return nil, fmt.Errorf("create database directory: %w", err)
+		}
+		// 目录权限也收紧。MkdirAll 只对**新建**目录应用 mode，对已存在的目录
+		// 保持原权限——而数据目录可能是运维预先建好的（默认 0755），
+		// 此时同机其他用户仍可列出目录内容、读到 control.db。
+		// chmod 对新建与已存在都生效，因此这里补一次。
+		if err := os.Chmod(dataDir, 0o700); err != nil {
+			slog.Warn("收紧数据目录权限失败，请检查属主与挂载选项",
+				"dir", dataDir, "error", err)
 		}
 		u := &url.URL{Scheme: "file", Path: absolute}
 		query := u.Query()
@@ -60,6 +70,22 @@ func OpenSQLite(ctx context.Context, path string, maxOpenConns int) (*sql.DB, er
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
+	}
+	// 数据库文件权限收紧到 0600（放在打开成功之后——此时文件必然已创建）。
+	//
+	// 目录是 0700，但控制库存着全部口令哈希、session/token 哈希与审计记录。
+	// 默认 umask(022) 下新建文件是 0644，同机其他用户可读；基线检查会报
+	// "数据库文件权限过大"。已实测确认过该问题。
+	//
+	// 对已存在的文件同样生效（修正历史遗留的宽松权限）。失败不阻断启动：
+	// 权限收紧失败不应让服务起不来，改由部署侧与审计兜底。
+	if path != ":memory:" && !strings.HasPrefix(path, "file:") {
+		if absolute, absErr := filepath.Abs(path); absErr == nil {
+			if err := os.Chmod(absolute, 0o600); err != nil {
+				slog.Warn("收紧控制库文件权限失败，请检查属主与挂载选项",
+					"path", absolute, "error", err)
+			}
+		}
 	}
 	return db, nil
 }
