@@ -107,10 +107,16 @@ func (b *Bridge) ReconcileNode(nodeID string) {
 		b.reconcileOwnerOfDeleted(nodeID)
 		return
 	}
-	// 禁用/启用后节点能力与快照不变，但 fleet 的 enabled provider 集变了，
-	// 因此对该用户全量重算（覆盖其节点提供的所有工具名）。
-	if err := b.reconcileUser(context.Background(), node.OwnerUserID); err != nil && b.logger != nil {
-		b.logger.Warn("用户 fleet 重算失败", "owner", node.OwnerUserID, "error", err)
+	b.ReconcileOwner(node.OwnerUserID)
+}
+
+// ReconcileOwner 重算该用户命名空间内的全部工具契约。
+//
+// 用户级变更（禁用用户、删除用户）没有单一节点入口，但同样要让 fleet 收敛：
+// 否则公开契约会残留指向已下线节点的记录。
+func (b *Bridge) ReconcileOwner(ownerUserID string) {
+	if err := b.reconcileUser(context.Background(), ownerUserID); err != nil && b.logger != nil {
+		b.logger.Warn("用户 fleet 重算失败", "owner", ownerUserID, "error", err)
 	}
 }
 
@@ -219,6 +225,10 @@ func (b *Bridge) reconcileOne(ownerUserID, toolName string) error {
 	}
 	descriptors := make([]protocol.ToolDescriptor, 0)
 	hasKnownProvider := false
+	// 公开契约的来源节点/版本用于排查"这个工具是谁提供的"。
+	// 取第一个 enabled 且提供该工具的节点——ListByOwner 已全序确定，
+	// 这里的结果是稳定的。
+	var sourceNodeID, sourceVersion string
 	for _, node := range nodeList {
 		if !containsCapability(node.Capabilities, toolName) {
 			continue
@@ -234,6 +244,10 @@ func (b *Bridge) reconcileOne(ownerUserID, toolName string) error {
 		descriptor, ok := findToolDescriptor(nodeDescriptors, toolName)
 		if !ok {
 			return errMissingDescriptor{nodeID: node.ID, tool: toolName}
+		}
+		if sourceNodeID == "" {
+			sourceNodeID = node.ID
+			sourceVersion = node.Version
 		}
 		descriptors = append(descriptors, descriptor)
 	}
@@ -276,7 +290,7 @@ func (b *Bridge) reconcileOne(ownerUserID, toolName string) error {
 	}
 	candidate := PublishedTool{
 		Descriptor: merged, ContractHash: contractHash, AcceptedSemanticHashes: acceptedHashes,
-		SourceNodeID: sourceNodeOf(descriptors), SourceVersion: sourceVersionOf(descriptors),
+		SourceNodeID: sourceNodeID, SourceVersion: sourceVersion,
 	}
 
 	b.mu.Lock()
@@ -300,9 +314,6 @@ func (b *Bridge) reconcileOne(ownerUserID, toolName string) error {
 	}
 	return nil
 }
-
-func sourceNodeOf(descriptors []protocol.ToolDescriptor) string    { return "" }
-func sourceVersionOf(descriptors []protocol.ToolDescriptor) string { return "" }
 
 type errMissingDescriptor struct {
 	nodeID string
