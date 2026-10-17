@@ -36,11 +36,6 @@ const (
 	argonKeyBytes    = 32
 )
 
-var commonWeakPasswords = map[string]struct{}{
-	"123456789012": {}, "password1234": {}, "qwerty123456": {},
-	"admin12345678": {}, "letmein123456": {}, "agenthub12345": {},
-}
-
 // User 是账号的公开形态（不含任何秘密）。
 type User struct {
 	ID                 string    `json:"id"`
@@ -134,20 +129,42 @@ func verifyArgon2(secret, encoded string) bool {
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
-// ValidatePassword 口令策略：至少 12 字符、不等于用户名、非常见弱口令。
+// ValidatePassword 口令策略（等保二级基线 + 常见弱口令防护）。
+//
+// 规则见 password_policy.go：长度、字符类别数、弱口令/模式检测。
+// 每条失败都给出可操作的原因——运维改密码时能看懂要改什么。
 func ValidatePassword(username, secret string) error {
-	if len([]rune(secret)) < 12 {
+	runes := []rune(secret)
+	if len(runes) < passwordMinLength {
 		return core.NewError(core.CodeValidation, "password must be at least 12 characters", nil)
 	}
-	if len(secret) > 1024 {
+	if len(runes) > passwordMaxLength {
+		// 上限保护：口令是登录未认证输入，超长会让 argon2 计算异常缓慢。
 		return core.NewError(core.CodeValidation, "password is too long", nil)
 	}
 	normalized := strings.ToLower(strings.TrimSpace(secret))
 	if normalized == strings.ToLower(strings.TrimSpace(username)) {
 		return core.NewError(core.CodeValidation, "password must not match the username", nil)
 	}
-	if _, weak := commonWeakPasswords[normalized]; weak {
+	// 字符类别：要求覆盖大小写/数字/符号中的三类。长度达标但类别不足
+	// 的典型是"密码密码密码密码"这类纯中文或纯小写重复。
+	if classes := countCharacterClasses(secret); classes < passwordRequiredClasses {
+		return core.NewError(core.CodeValidation,
+			"password must combine at least 3 of: uppercase, lowercase, digits, symbols", nil)
+	}
+	if isWeakPassword(normalized) {
 		return core.NewError(core.CodeValidation, "password is too common", nil)
+	}
+	if hasSequentialRun(normalized, 4) || hasKeyboardRowSequence(normalized) {
+		return core.NewError(core.CodeValidation, "password must not contain sequential characters", nil)
+	}
+	if hasRepeatedRun(secret, 3) || repeatedBlockPattern(normalized) {
+		return core.NewError(core.CodeValidation, "password must not repeat the same characters", nil)
+	}
+	// 用户名作为口令的一部分（如 joe@corp + "123456"）也要拦。
+	usernamePart := strings.ToLower(strings.TrimSpace(username))
+	if len(usernamePart) >= 4 && strings.Contains(normalized, usernamePart) {
+		return core.NewError(core.CodeValidation, "password must not contain the username", nil)
 	}
 	return nil
 }

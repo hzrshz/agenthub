@@ -1,8 +1,8 @@
 package auth
 
 import (
-	"database/sql"
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -26,7 +26,7 @@ func newTestService(t *testing.T) *Service {
 	return NewService(db)
 }
 
-const strongPassword = "correct-horse-battery"
+const strongPassword = "Corr7horseKp4z"
 
 // 管理员自举：首次成功，二次必须拒绝——防止公网入口被用来再建管理员。
 func TestInitializeAdminOnceOnly(t *testing.T) {
@@ -130,13 +130,13 @@ func TestChangePasswordRevokesSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	if err := svc.ChangePassword(ctx, issued.Session.UserID, strongPassword, "newer-stronger-passphrase"); err != nil {
+	if err := svc.ChangePassword(ctx, issued.Session.UserID, strongPassword, "Newer8strongKp4z"); err != nil {
 		t.Fatalf("change password: %v", err)
 	}
 	if _, err := svc.AuthenticateSession(ctx, issued.Token); err == nil {
 		t.Fatal("session must be revoked after password change")
 	}
-	reissued, err := svc.Login(ctx, "root@example.com", "newer-stronger-passphrase", "203.0.113.1")
+	reissued, err := svc.Login(ctx, "root@example.com", "Newer8strongKp4z", "203.0.113.1")
 	if err != nil {
 		t.Fatalf("login with new password: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestCreateDisableUserAndMCPToken(t *testing.T) {
 		t.Fatalf("initialize admin: %v", err)
 	}
 
-	user, err := svc.CreateUser(ctx, admin.ID, "alice@example.com", "initial-pass-123456")
+	user, err := svc.CreateUser(ctx, admin.ID, "alice@example.com", "Initial7passKp2z")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestCreateDisableUserAndMCPToken(t *testing.T) {
 	if _, err := svc.AuthenticateMCPToken(ctx, newToken); err == nil {
 		t.Fatal("disabled user's mcp token must be rejected")
 	}
-	if _, err := svc.Login(ctx, "alice@example.com", "initial-pass-123456", "203.0.113.3"); err == nil {
+	if _, err := svc.Login(ctx, "alice@example.com", "Initial7passKp2z", "203.0.113.3"); err == nil {
 		t.Fatal("disabled user must not log in")
 	}
 	if err := svc.EnableUser(ctx, admin.ID, user.ID); err != nil {
@@ -243,7 +243,7 @@ func TestPasswordPolicy(t *testing.T) {
 			t.Fatalf("%s must be rejected", tc.name)
 		}
 	}
-	if err := ValidatePassword("u@example.com", "a-long-enough-passphrase"); err != nil {
+	if err := ValidatePassword("u@example.com", "K7mQx2wrTp9zVn"); err != nil {
 		t.Fatalf("valid password rejected: %v", err)
 	}
 }
@@ -271,7 +271,7 @@ func TestLoginIPThrottleNotClearedByAnotherAccountsSuccess(t *testing.T) {
 	if _, err := svc.InitializeAdmin(ctx, "root@example.com", strongPassword); err != nil {
 		t.Fatalf("initialize admin: %v", err)
 	}
-	if _, err := svc.CreateUser(ctx, "root", "attacker@example.com", "attacker-passphrase-1"); err != nil {
+	if _, err := svc.CreateUser(ctx, "root", "attacker@example.com", "Attack7rKp9zQm"); err != nil {
 		t.Fatalf("create attacker: %v", err)
 	}
 
@@ -310,7 +310,7 @@ func TestLoginIPThrottleNotClearedByAnotherAccountsSuccess(t *testing.T) {
 
 	// 推进时钟越过封锁窗口（250ms 级），再让攻击者用自己的合法账号成功登录。
 	clock = clock.Add(10 * time.Second)
-	if _, err := svc.Login(ctx, "attacker@example.com", "attacker-passphrase-1", ip); err != nil {
+	if _, err := svc.Login(ctx, "attacker@example.com", "Attack7rKp9zQm", ip); err != nil {
 		t.Fatalf("attacker's own login must succeed: %v", err)
 	}
 	after := failures()
