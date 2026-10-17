@@ -24,6 +24,10 @@ var (
 	ErrNodeDisabled       = errors.New("节点已停用")
 	ErrNodeLimitReached   = errors.New("节点数量已达上限")
 	ErrPairingCodeInvalid = errors.New("配对码无效或已过期")
+	// ErrOwnerDisabled 表示配对码归属的用户已被禁用。
+	// DESIGN §4.3 要求"禁用用户 = 配对码作废"：禁用后仍能兑换出新节点，
+	// 会让已禁用的账号持续消耗 MaxNodesPerUser 配额并留下无效节点行。
+	ErrOwnerDisabled = errors.New("用户已禁用")
 )
 
 // Node 是节点的业务视图（不含 token 哈希）。
@@ -71,6 +75,28 @@ type Store struct {
 
 func NewStore(db *sql.DB) *Store {
 	return &Store{db: db, now: time.Now}
+}
+
+// recordAudit 写一条审计事件（append-only）。
+//
+// 节点侧动作（配对/启停/删除）此前完全不写审计：DESIGN §5 声明 actor 含 device，
+// 出了事（节点被盗用、误删）没有可追溯的记录。审计失败不阻断主流程——
+// 业务动作已经发生，为记一笔日志而回滚会更糟。
+func (s *Store) recordAudit(ctx context.Context, actorType, actorID, action, objectID string, metadata map[string]any) {
+	metadataJSON := "{}"
+	if metadata != nil {
+		if raw, err := json.Marshal(metadata); err == nil {
+			metadataJSON = string(raw)
+		}
+	}
+	id, err := core.NewID("evt")
+	if err != nil {
+		return
+	}
+	_, _ = s.db.ExecContext(ctx, `INSERT INTO audit_events(
+		id, occurred_at, actor_type, actor_id, action, object_type, object_id, result, metadata_json
+	) VALUES(?, ?, ?, ?, ?, 'node', ?, 'succeeded', ?)`,
+		id, s.now().UTC().Format(time.RFC3339Nano), actorType, actorID, action, objectID, metadataJSON)
 }
 
 // CreatePairingCode 为指定用户生成一次性配对码；哈希落库、明文只返回一次。
@@ -121,10 +147,13 @@ func (s *Store) Pair(ctx context.Context, input PairInput) (Node, error) {
 	defer func() { _ = tx.Rollback() }()
 
 	var ownerUserID, pairID string
-	err = tx.QueryRowContext(ctx, `SELECT id, owner_user_id FROM pairing_codes
-		WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?`,
+	err = tx.QueryRowContext(ctx, `SELECT p.id, p.owner_user_id FROM pairing_codes p
+		JOIN users u ON u.id = p.owner_user_id
+		WHERE p.code_hash = ? AND p.used_at IS NULL AND p.expires_at > ? AND u.status = 'active'`,
 		core.HashToken(code), now.Format(time.RFC3339Nano)).Scan(&pairID, &ownerUserID)
 	if errors.Is(err, sql.ErrNoRows) {
+		// 码不存在 / 已用 / 过期 / 归属用户已被禁用——一律同码，
+		// 不向公网无认证入口泄露"码存在但主人被禁了"这一信息。
 		return Node{}, ErrPairingCodeInvalid
 	}
 	if err != nil {
@@ -148,9 +177,22 @@ func (s *Store) Pair(ctx context.Context, input PairInput) (Node, error) {
 	if err != nil {
 		return Node{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE pairing_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
-		now.Format(time.RFC3339Nano), pairID); err != nil {
+	// 消费配对码必须断言命中行数：单次语义靠 used_at IS NULL 的条件更新保证，
+	// 但两个并发事务可能都通过了上面的 SELECT（SQLite 读不阻塞），
+	// 若不检查 RowsAffected，第二个事务会静默更新 0 行后继续建节点，
+	// 一个配对码就产出两个节点 + 两个 device token。
+	result, err := tx.ExecContext(ctx, `UPDATE pairing_codes SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+		now.Format(time.RFC3339Nano), pairID)
+	if err != nil {
+		// 写锁竞争：别人正在消费同一枚码。对调用方而言等价于"码已被用"。
+		if strings.Contains(strings.ToLower(err.Error()), "locked") {
+			return Node{}, ErrPairingCodeInvalid
+		}
 		return Node{}, fmt.Errorf("消费配对码: %w", err)
+	}
+	if consumed, _ := result.RowsAffected(); consumed != 1 {
+		// 已被并发请求抢走：本事务回滚，不建节点。
+		return Node{}, ErrPairingCodeInvalid
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes(
 		id, owner_user_id, device_id, name, enabled, device_token_hash, created_at, updated_at
@@ -160,11 +202,19 @@ func (s *Store) Pair(ctx context.Context, input PairInput) (Node, error) {
 		if core.IsSQLiteConflict(err) || strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return Node{}, ErrNodeExists
 		}
+		// 写锁竞争（SQLITE_BUSY）本质是"别人正在消费这个码"，
+		// 对调用方与"码已被用过"无差别，统一映射成 ErrPairingCodeInvalid，
+		// 不把底层数据库错误泄漏到 HTTP 响应里。
+		if strings.Contains(strings.ToLower(err.Error()), "locked") {
+			return Node{}, ErrPairingCodeInvalid
+		}
 		return Node{}, fmt.Errorf("创建节点: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Node{}, fmt.Errorf("提交配对事务: %w", err)
 	}
+	// 审计 actor 是 device：配对由 AgentDock 用配对码发起，归属用户由码决定。
+	s.recordAudit(ctx, "device", nodeID, "node.pair", nodeID, map[string]any{"owner": ownerUserID, "device_id": deviceID})
 	node, err := s.Get(ctx, nodeID)
 	if err != nil {
 		return Node{}, err
@@ -217,9 +267,61 @@ func (s *Store) AuthenticateDeviceToken(ctx context.Context, rawToken string) (N
 	return node, nil
 }
 
+// RevokeOwnerAccess 是禁用用户时的一次性清理：作废该用户全部未用配对码，
+// 返回其全部节点 ID 供调用方踢线。
+//
+// DESIGN §4.3 要求"禁用用户 = 节点连接断开 + 配对码作废"。配对码在此显式作废
+// （而不是只靠 Pair 侧校验用户状态）是为了不让已禁用的账号继续囤积有效配对码——
+// 否则禁用解除后，一段时间内签发过的旧码仍然可用。
+func (s *Store) RevokeOwnerAccess(ctx context.Context, ownerUserID string) ([]string, error) {
+	nodeList, err := s.ListByOwner(ctx, ownerUserID)
+	if err != nil {
+		return nil, fmt.Errorf("列出待踢线节点: %w", err)
+	}
+	nodeIDs := make([]string, 0, len(nodeList))
+	for _, node := range nodeList {
+		nodeIDs = append(nodeIDs, node.ID)
+	}
+	// 立即占用已用标记：Pair 的兑换条件是 used_at IS NULL，
+	// 置上即可让存量码立即失效（expires_at 保持原值，不影响审计追溯）。
+	if _, err := s.db.ExecContext(ctx, `UPDATE pairing_codes SET used_at = ?
+		WHERE owner_user_id = ? AND used_at IS NULL`,
+		s.now().UTC().Format(time.RFC3339Nano), ownerUserID); err != nil {
+		return nil, fmt.Errorf("作废用户配对码: %w", err)
+	}
+	return nodeIDs, nil
+}
+
+// ListAllOwners 分页列出拥有节点的用户 ID，供启动恢复 fleet 公开契约使用。
+func (s *Store) ListAllOwners(ctx context.Context, limit, offset int) ([]string, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT owner_user_id FROM nodes ORDER BY owner_user_id LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("列出节点归属用户: %w", err)
+	}
+	defer rows.Close()
+	owners := make([]string, 0, limit)
+	for rows.Next() {
+		var owner string
+		if err := rows.Scan(&owner); err != nil {
+			return nil, fmt.Errorf("扫描节点归属用户: %w", err)
+		}
+		owners = append(owners, owner)
+	}
+	return owners, rows.Err()
+}
+
 // ListByOwner 返回用户的全部节点。
+//
+// 排序必须全序确定：fleet 合并同名工具时以 descriptors[0] 为基准决定公开契约，
+// 若同毫秒创建的节点顺序在两次查询间翻转，会让公开 descriptor 抖动、MCP 客户端
+// 反复刷新工具面。created_at 是 TEXT 时间戳，单独用它排序无法区分同毫秒记录，
+// 因此追加 id 作为 tie-breaker（与 nexusdock ORDER BY name, id 同一立场）。
 func (s *Store) ListByOwner(ctx context.Context, ownerUserID string) ([]Node, error) {
-	rows, err := s.db.QueryContext(ctx, getColumns()+` FROM nodes WHERE owner_user_id = ? ORDER BY created_at`, strings.TrimSpace(ownerUserID))
+	rows, err := s.db.QueryContext(ctx, getColumns()+` FROM nodes WHERE owner_user_id = ?
+		ORDER BY created_at, id`, strings.TrimSpace(ownerUserID))
 	if err != nil {
 		return nil, fmt.Errorf("列出用户节点: %w", err)
 	}
@@ -280,6 +382,11 @@ func (s *Store) SetEnabled(ctx context.Context, ownerUserID, nodeID string, enab
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return Node{}, ErrNodeNotFound
 	}
+	action := "node.disable"
+	if enabled {
+		action = "node.enable"
+	}
+	s.recordAudit(ctx, "user", ownerUserID, action, nodeID, map[string]any{"enabled": enabled})
 	return s.GetOwned(ctx, ownerUserID, nodeID)
 }
 
@@ -296,6 +403,7 @@ func (s *Store) Delete(ctx context.Context, ownerUserID, nodeID string) error {
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return ErrNodeNotFound
 	}
+	s.recordAudit(ctx, "user", ownerUserID, "node.delete", nodeID, nil)
 	return nil
 }
 

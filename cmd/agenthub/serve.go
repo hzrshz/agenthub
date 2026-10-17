@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -47,7 +48,18 @@ func serve(ctx context.Context, cfg config.Config) error {
 		},
 	})
 	hub.SetHelloHandler(fleetBridge.ObserveNodeHello)
-	handler := httpx.NewServer(authService, nodeStore, hub, gateway, invokeStore, cfg.PublicURL).Handler()
+	trustedProxies, err := cfg.TrustedProxies()
+	if err != nil {
+		return err
+	}
+	handler := httpx.NewServerWithFleet(authService, nodeStore, hub, gateway, invokeStore, cfg.PublicURL, trustedProxies, fleetBridge).Handler()
+
+	// 启动恢复：把持久化的公开契约装回内存态并重放 Publish。
+	// 不做这一步，进程重启后 fleet 内存态为空——工具面要等节点全部重连发 hello
+	// 才恢复，期间用户看到空工具面，且删节点等事件无处收敛。
+	if err := fleetBridge.RestoreStartup(ctx, fleetOwnerUserIDs(ctx, nodeStore)); err != nil {
+		return fmt.Errorf("恢复 fleet 公开契约: %w", err)
+	}
 
 	// 调用记录滚动清理：每小时一次，失败只记日志。
 	cleanupStop := make(chan struct{})
@@ -95,4 +107,27 @@ func openDB(ctx context.Context, cfg config.Config) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// fleetOwnerUserIDs 列出所有拥有节点的用户，作为启动恢复 fleet 的作用域。
+// 从 nodes 表取而不是 users 表：没有节点的用户本来就没有公开契约可恢复。
+func fleetOwnerUserIDs(ctx context.Context, store *nodes.Store) []string {
+	seen := make(map[string]struct{})
+	var owners []string
+	for {
+		page, err := store.ListAllOwners(ctx, 200, len(owners))
+		if err != nil || len(page) == 0 {
+			return owners
+		}
+		for _, owner := range page {
+			if _, exists := seen[owner]; exists {
+				continue
+			}
+			seen[owner] = struct{}{}
+			owners = append(owners, owner)
+		}
+		if len(page) < 200 {
+			return owners
+		}
+	}
 }

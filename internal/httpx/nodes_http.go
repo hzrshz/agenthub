@@ -4,11 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 
 	protocol "github.com/uvwt/agentdock-protocol"
 
-	"github.com/uvwt/agenthub/internal/bridge"
 	"github.com/uvwt/agenthub/internal/core"
 	"github.com/uvwt/agenthub/internal/nodes"
 )
@@ -55,6 +53,11 @@ func (s *Server) handleDisableNode(w http.ResponseWriter, r *http.Request) {
 	}
 	// 禁用即踢线：现有连接断开，新连接被 SetEnabled 后的存储查询拒绝。
 	s.hub.Disconnect(node.ID)
+	// 启停会改变 fleet 的 enabled provider 集，必须重算，
+	// 否则公开契约残留指向已下线节点（DESIGN §3.3 离线即撤工具）。
+	if s.fleet != nil {
+		s.fleet.ReconcileNode(node.ID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"node": node})
 }
 
@@ -65,17 +68,25 @@ func (s *Server) handleEnableNode(w http.ResponseWriter, r *http.Request) {
 		writeNodeError(w, err)
 		return
 	}
+	if s.fleet != nil {
+		s.fleet.ReconcileNode(node.ID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"node": node})
 }
 
 func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	session, _ := sessionFromContext(r.Context())
-	if err := s.nodes.Delete(r.Context(), session.UserID, r.PathValue("id")); err != nil {
+	nodeID := r.PathValue("id")
+	if err := s.nodes.Delete(r.Context(), session.UserID, nodeID); err != nil {
 		writeNodeError(w, err)
 		return
 	}
 	// 删除即吊销：device token 哈希随行删除，旧 token 永久失效。
-	s.hub.Disconnect(r.PathValue("id"))
+	s.hub.Disconnect(nodeID)
+	// 节点消失后重算：其独占提供的工具应从工具面下架。
+	if s.fleet != nil {
+		s.fleet.ReconcileNode(nodeID)
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -90,6 +101,10 @@ func writeNodeError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "NODE_LIMIT_REACHED", "node limit reached")
 	case errors.Is(err, nodes.ErrPairingCodeInvalid):
 		writeError(w, http.StatusBadRequest, "PAIRING_CODE_INVALID", "pairing code invalid or expired")
+	case errors.Is(err, nodes.ErrNodeExists):
+		// 同 device_id 重复配对是冲突而非服务端错误；
+		// 裸 errors.New 会落 default 分支变成 500，误导 AgentDock 重试。
+		writeError(w, http.StatusConflict, "NODE_EXISTS", "device already paired")
 	default:
 		writeAuthError(w, err)
 	}
@@ -121,6 +136,8 @@ func (s *Server) handleNodePair(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNodeConnect(w http.ResponseWriter, r *http.Request) {
 	node, err := s.nodes.AuthenticateDeviceToken(r.Context(), r.Header.Get("Authorization"))
 	if err != nil {
+		// 认证失败必须留痕（DESIGN §7）：设备 token 被盗用/爆破在这里露头。
+		s.logger().Warn("节点连接认证失败", "remote", r.RemoteAddr, "error", err)
 		switch core.ErrorCodeOf(err) {
 		case core.CodeAuthRequired, core.CodeInvalidToken, core.CodeTokenRevoked:
 			writeError(w, http.StatusUnauthorized, "INVALID_DEVICE_TOKEN", "device token invalid")
@@ -129,18 +146,9 @@ func (s *Server) handleNodeConnect(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	// Accept 成功后连接升级，不能再写 HTTP 响应。
-	if err := s.hub.Accept(w, r, node.ID, s.public); err != nil && errors.Is(err, bridge.ErrNodeDisconnected) {
-		// 仅记录可识别的关闭路径；其余错误同样无法回写响应。
-		_ = err
+	// Accept 成功后连接已升级为 WebSocket，不能再写 HTTP 响应，
+	// 因此拒绝原因只能记日志（协议版本不符时已通过错误帧回传给节点）。
+	if err := s.hub.Accept(w, r, node.ID, s.public); err != nil {
+		s.logger().Warn("节点握手拒绝", "node", node.ID, "user", node.OwnerUserID, "error", err)
 	}
-}
-
-// bearerToken 提取 Authorization 头中的 Bearer 值。
-func bearerToken(header string) string {
-	header = strings.TrimSpace(header)
-	if len(header) > 7 && strings.EqualFold(header[:7], "Bearer ") {
-		return strings.TrimSpace(header[7:])
-	}
-	return ""
 }

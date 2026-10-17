@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,12 +24,17 @@ const (
 	// MaxInflightPerNode 每节点并发在途 tool.invoke 上限，超限立即 429，
 	// 防止单个慢节点拖垮该用户的整条 WS 连接。
 	MaxInflightPerNode = 16
+	// MaxInflightPerUser 每用户跨全部节点的并发在途上限（DESIGN §6
+	// "每用户/每节点在途请求 16"是两个独立维度）。单节点上限挡不住
+	// 用户把压力分散到自己的多个节点上。
+	MaxInflightPerUser = 16
 	// PairingCodeTTL 配对码有效期；单次使用。
 	PairingCodeTTL = 10 * time.Minute
 	// PairAttemptsPerMinute /v1/nodes/pair 是公网无认证入口，按 IP 限流防配对码爆破。
 	PairAttemptsPerMinute = 10
-	// LoginAttemptsPerMinute 登录失败限流基数（账号与 IP 两个维度各算一份）。
-	LoginAttemptsPerMinute = 10
+	// LoginThrottleMaxFailures 登录失败多少次后进入最长封锁（15 分钟）。
+	// 阶梯在 auth.loginDelay 内按此上界分段。
+	LoginThrottleMaxFailures = 10
 	// InvokeTimeout 单次 tool.invoke 从转发到节点到放弃的等待上限。
 	InvokeTimeout = 120 * time.Second
 	// MaxMessageBytes 单条 WS/MCP 消息体上限；超限报错而非缓冲，
@@ -42,6 +48,14 @@ const (
 	InvokeLogRetention = 30 * 24 * time.Hour
 	// InvokeLogMaxRows invoke_logs 条数硬上限，清理时一并裁剪。
 	InvokeLogMaxRows = 100000
+	// MinProtocolVersion 节点 hello 允许的最低协议版本；低于此值拒连并给升级指引。
+	MinProtocolVersion = "2"
+	// MCPAuthFailureLimitPerMinute 单 IP 每分钟允许的 /mcp 认证失败次数，
+	// 超过即 429。DESIGN §3.2 要求"认证失败按 IP 限流"——无效 token 的 401
+	// 是可无成本爆破的入口，必须在认证失败侧也有速率上限。
+	MCPAuthFailureLimitPerMinute = 30
+	// MCPAuthFailureBlock 返回 429 前对该 IP 的封锁时长。
+	MCPAuthFailureBlock = 5 * time.Minute
 )
 
 // Config 是进程启动所需的全部外部配置。除 PublicURL 外都有可用默认值。
@@ -53,6 +67,15 @@ type Config struct {
 	// PublicURL hub 的公网 HTTPS origin（无路径）。节点据此推导回调地址，
 	// 是唯一必填配置。
 	PublicURL string
+	// TrustedProxyCIDRs 允许提供 X-Forwarded-For 的反代来源网段。
+	// 安全边界：clientIP 只在这些网段的来源才采信 XFF，否则一律用 RemoteAddr。
+	// 空列表 = 不采信任何 XFF（默认，配合"hub 只监听回环"的部署形态最安全）。
+	TrustedProxyCIDRs []string
+}
+
+// Resolver 是把可信反代网段预解析成可快速比对的集合。
+type Resolver struct {
+	nets []*net.IPNet
 }
 
 // Load 从环境变量读取配置并校验。
@@ -69,6 +92,11 @@ func Load() (Config, error) {
 		}
 		cfg.DataDir = filepath.Join(home, ".agenthub")
 	}
+	for _, entry := range strings.Split(envDefault("HUB_TRUSTED_PROXY_CIDRS", ""), ",") {
+		if trimmed := strings.TrimSpace(entry); trimmed != "" {
+			cfg.TrustedProxyCIDRs = append(cfg.TrustedProxyCIDRs, trimmed)
+		}
+	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, err
 	}
@@ -83,7 +111,74 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Listen) == "" {
 		return errors.New("listen address is empty")
 	}
+	if _, err := c.TrustedProxies(); err != nil {
+		return err
+	}
 	return ValidatePublicURL(c.PublicURL)
+}
+
+// TrustedProxies 解析可信反代网段；非法网段在启动时直接失败，
+// 避免部署后才发现 XFF 根本没被采信（或反被伪造）。
+func (c Config) TrustedProxies() (*Resolver, error) {
+	resolver := &Resolver{}
+	for _, entry := range c.TrustedProxyCIDRs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(entry))
+		if err != nil {
+			return nil, fmt.Errorf("invalid HUB_TRUSTED_PROXY_CIDRS entry %q: %w", entry, err)
+		}
+		resolver.nets = append(resolver.nets, network)
+	}
+	return resolver, nil
+}
+
+// Trusts 报告该远端地址是否属于可信反代。
+func (r *Resolver) Trusts(remoteAddr string) bool {
+	if r == nil || len(r.nets) == 0 {
+		return false
+	}
+	host := remoteAddr
+	if parsed, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = parsed
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return false
+	}
+	for _, network := range r.nets {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClientIP 返回限流与审计使用的客户端 IP。
+//
+// 安全边界：X-Forwarded-For 由客户端可任意伪造，若无条件采信，攻击者每次换一个
+// 伪造 IP 即可完全绕过所有按 IP 的限流（登录爆破、配对码爆破、MCP token 爆破）。
+// 因此只有当直接对端（RemoteAddr）落在配置的可信反代网段时才采信 XFF，否则一律
+// 用 RemoteAddr。默认无可信网段 = 完全不采信 XFF。
+//
+// 放在 config 包是因为 httpx 与 mcpgw 两处都要用它做限流键，必须是同一套语义。
+func ClientIP(r *http.Request, trusted *Resolver) string {
+	remote := RemoteIP(r)
+	if trusted != nil && trusted.Trusts(remote) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// 取最左侧一跳：可信反代按"客户端, 代理1, 代理2"顺序追加，
+			// 最左侧才是最初的客户端。
+			return strings.TrimSpace(strings.Split(xff, ",")[0])
+		}
+	}
+	return remote
+}
+
+// RemoteIP 从 RemoteAddr 取出 IP（不采信任何请求头）。
+func RemoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
 }
 
 // ValidatePublicURL 校验 HUB_PUBLIC_URL 形态。

@@ -1,7 +1,6 @@
 package httpx
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -90,5 +89,3 @@ func parseInvokeQuery(w http.ResponseWriter, r *http.Request) (audit.InvokeQuery
 	}
 	return query, true
 }
-
-var _ = errors.New // reserved

@@ -196,6 +196,9 @@ type createParams struct {
 	// passwordHash 允许调用方直接传入已编码口令（重置密码场景复用校验逻辑时）。
 	passwordHash string
 	mustChange   bool
+	// actorID 记录"谁建了这个账号"。管理员建号传管理员 ID，CLI 自举传空
+	// （此时 actor 是 system——库里的第一个账号不存在"谁点的"）。
+	actorID string
 }
 
 // createUser 在单事务内建用户+凭证；checkAdminCount 为 true 时先校验自举唯一性。
@@ -249,7 +252,13 @@ func (s *Service) createUser(ctx context.Context, params createParams, checkAdmi
 	if err := tx.Commit(); err != nil {
 		return User{}, fmt.Errorf("commit create user: %w", err)
 	}
-	s.recordAudit(ctx, "admin", "system", "auth.user.create", userID, "succeeded", map[string]any{"role": params.role})
+	// actor 归属：记录真实操作者。CLI 自举是库里的第一个账号，没有"谁点的"，
+	// 记 system；管理员建号记管理员 ID。
+	actorType, actorID := "admin", params.actorID
+	if actorID == "" {
+		actorType, actorID = "system", "system"
+	}
+	s.recordAudit(ctx, actorType, actorID, "auth.user.create", userID, "succeeded", map[string]any{"role": params.role})
 	return User{
 		ID: userID, Username: username, DisplayName: username, Role: params.role,
 		Status: "active", MustChangePassword: params.mustChange,
@@ -285,14 +294,22 @@ func (s *Service) Login(ctx context.Context, username, password, ip string) (Iss
 	}
 	if !valid {
 		retry := s.recordLoginFailure(ctx, accountKey, ipKey)
-		s.recordAudit(ctx, "admin", "system", "auth.login", accountKey[:16], "failed", nil)
+		// actor 归属：登录失败是"某账号"的事件，actor 必须是那个账号而不是 admin。
+		// 此前硬编码 actor_type="admin"/actor_id="system"，让审计里所有登录失败
+		// 都被记成管理员行为，按 action 追溯来源时得到错误结论。
+		s.recordAudit(ctx, "user", accountKey[:16], "auth.login", accountKey[:16], "failed", nil)
 		if retry >= time.Minute {
 			return IssuedSession{}, &RateLimitError{RetryAfter: retry}
 		}
 		// 口令正确但用户被禁用等场景同样走这里；返回统一错误避免泄露原因。
 		return IssuedSession{}, core.NewError(core.CodeInvalidToken, "invalid username or password", nil)
 	}
-	s.clearLoginFailures(ctx, accountKey, ipKey)
+	s.clearAccountFailures(ctx, accountKey)
+	// 安全边界：IP 维度的失败计数**不**因任意账号登录成功而清零。
+	// 若一并清除，同一出口 IP（NAT/企业网关）下任意一个用户正常登录，
+	// 就等于替所有正在爆破的人重置配额——IP 限流是按来源聚合的防护，
+	// 只能靠 IP 侧自己的失败累积衰减，不能被单个账号的成功登录抹掉。
+	s.decayIPFailures(ctx, ipKey)
 	issued, err := s.createSession(ctx, userID, storedUsername, role, mustChange != 0)
 	if err != nil {
 		return IssuedSession{}, err
@@ -427,7 +444,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, n
 // CreateUser 管理员创建普通用户；初始口令由管理员设置，首登强制改密。
 func (s *Service) CreateUser(ctx context.Context, adminID, username, password string) (User, error) {
 	return s.createUser(ctx, createParams{
-		username: username, password: password, role: "user", mustChange: true,
+		username: username, password: password, role: "user", mustChange: true, actorID: adminID,
 	}, false)
 }
 
@@ -659,10 +676,10 @@ func (s *Service) recordLoginFailure(ctx context.Context, accountKey, ipKey stri
 	return longest
 }
 
-// loginDelay 失败次数递增的封锁时长，10 次后稳定 15 分钟。
+// loginDelay 失败次数递增的封锁时长，LoginThrottleMaxFailures 次后稳定 15 分钟。
 func loginDelay(failures int) time.Duration {
 	switch {
-	case failures >= 10:
+	case failures >= config.LoginThrottleMaxFailures:
 		return 15 * time.Minute
 	case failures >= 7:
 		return 5 * time.Minute
@@ -679,8 +696,40 @@ func loginDelay(failures int) time.Duration {
 	}
 }
 
-func (s *Service) clearLoginFailures(ctx context.Context, accountKey, ipKey string) {
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM login_throttles WHERE (key_type = 'account' AND key_value = ?) OR (key_type = 'ip' AND key_value = ?)`, accountKey, ipKey)
+// clearAccountFailures 只清账号维度的失败计数。
+// 账号维度是"这个账号被打了多少次"，成功后理应归零。
+func (s *Service) clearAccountFailures(ctx context.Context, accountKey string) {
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM login_throttles WHERE key_type = 'account' AND key_value = ?`, accountKey)
+}
+
+// decayIPFailures 让 IP 维度的失败计数单调衰减：成功登录时把计数减半而不是清零。
+//
+// 语义取舍：IP 计数是"这个来源最近有多可疑"的信号。一次成功登录是弱正信号
+// （证明这个 IP 上有合法用户），但不足以证明此前的爆破不是它干的——恶意者完全
+// 可以用自己的合法账号来反复刷新配额。因此只做减半，既不让正常用户被误伤到
+// 永久锁定，也堵死"登录一次即恢复全部免费爆破次数"的绕过路径。
+func (s *Service) decayIPFailures(ctx context.Context, ipKey string) {
+	var failures int
+	err := s.db.QueryRowContext(ctx, `SELECT failures FROM login_throttles
+		WHERE key_type = 'ip' AND key_value = ?`, ipKey).Scan(&failures)
+	if errors.Is(err, sql.ErrNoRows) || err != nil {
+		return
+	}
+	if failures <= 0 {
+		return
+	}
+	halved := failures / 2
+	if halved < 1 {
+		halved = 1
+	}
+	// 计数降到 1 时把 blocked_until 一并清掉：此时阶梯延迟只有 250ms，
+	// 不再构成实际防护，留着只会让正常用户莫名其妙地等。
+	blockedUntil := any(nil)
+	if halved >= 5 {
+		blockedUntil = s.now().UTC().Add(loginDelay(halved)).Format(time.RFC3339Nano)
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE login_throttles SET failures = ?, blocked_until = ?
+		WHERE key_type = 'ip' AND key_value = ?`, halved, blockedUntil, ipKey)
 }
 
 // ---- 审计 ----
