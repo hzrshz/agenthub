@@ -1,8 +1,8 @@
 package fleet
 
 import (
-	"errors"
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -422,8 +422,8 @@ func TestMergeFleetRejectsDrift(t *testing.T) {
 		"required": []any{"mode"},
 	})
 	cases := []struct {
-		label   string
-		mutate  func(map[string]any)
+		label  string
+		mutate func(map[string]any)
 	}{
 		{"type drift", func(s map[string]any) {
 			s["properties"].(map[string]any)["mode"].(map[string]any)["type"] = "number"

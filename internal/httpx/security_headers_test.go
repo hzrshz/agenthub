@@ -195,7 +195,7 @@ func TestAuditActorAndSourceIPAreConsistent(t *testing.T) {
 	if _, err := e.svc.InitializeAdmin(ctx, "root@example.com", strongPassword); err != nil {
 		t.Fatalf("init admin: %v", err)
 	}
-	if _, err := e.svc.CreateUser(ctx, "root", "victim@example.com", "victim-passphrase-1"); err != nil {
+	if _, err := e.svc.CreateUser(ctx, "root", "victim@example.com", "Victim7passKp8z"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 

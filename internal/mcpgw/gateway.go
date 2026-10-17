@@ -85,19 +85,19 @@ func (g *Gateway) Handler() http.Handler {
 			writeMCPError(w, http.StatusUnauthorized, string(core.ErrorCodeOf(err)), "mcp token invalid")
 			return
 		}
-if !g.allowRequest(user.ID) {
-		writeMCPError(w, http.StatusTooManyRequests, "RATE_LIMITED", "mcp request rate limit exceeded")
-		return
-	}
-	// 在途超限在这里预检并直接 429（DESIGN §6 "超限立即 429"）。
-	// 为什么必须在 Handler 层：MCP 的一次 tools/call 响应状态码在请求开始时就
-	// 确定了，进了工具处理器再想返回 429 只能得到 HTTP 200 + isError，
-	// 客户端的 HTTP 层限流重试策略（按状态码）不会生效。
-	if !g.userHasInflightCapacity(user.ID) {
-		w.Header().Set("Retry-After", "1")
-		writeMCPError(w, http.StatusTooManyRequests, string(core.CodeTooManyRequests), "concurrent request limit reached")
-		return
-	}
+		if !g.allowRequest(user.ID) {
+			writeMCPError(w, http.StatusTooManyRequests, "RATE_LIMITED", "mcp request rate limit exceeded")
+			return
+		}
+		// 在途超限在这里预检并直接 429（DESIGN §6 "超限立即 429"）。
+		// 为什么必须在 Handler 层：MCP 的一次 tools/call 响应状态码在请求开始时就
+		// 确定了，进了工具处理器再想返回 429 只能得到 HTTP 200 + isError，
+		// 客户端的 HTTP 层限流重试策略（按状态码）不会生效。
+		if !g.userHasInflightCapacity(user.ID) {
+			w.Header().Set("Retry-After", "1")
+			writeMCPError(w, http.StatusTooManyRequests, string(core.CodeTooManyRequests), "concurrent request limit reached")
+			return
+		}
 		// 每请求临时 server：按用户动态注册工具面（Stateless 模式下 handler
 		// 只在本次请求内使用该 server，注册成本低且天然用户隔离）。
 		server := mcp.NewServer(&mcp.Implementation{Name: "agenthub", Version: "1"}, &mcp.ServerOptions{})
@@ -341,7 +341,7 @@ func (g *Gateway) callNodeTool(ctx context.Context, userID, toolName string, arg
 	}
 	if !fleet.ContainsHash(published.AcceptedSemanticHashes, nodeHash) {
 		return nil, &core.CodedError{
-			Code: CodeToolContractMismatch,
+			Code:    CodeToolContractMismatch,
 			Message: fmt.Sprintf("目标节点工具 %s 的契约不在当前兼容集合内，请刷新工具列表或升级该设备的 AgentDock", toolName),
 			// 契约漂移不是"稍后重试能好"的错误：重试多少次结果都一样，
 			// 必须让平台升级 AgentDock 或重新加载工具面。
@@ -485,14 +485,14 @@ func UserIDFromContext(ctx context.Context) string {
 // 字段与 nexusdock ToolContractMismatch 对齐（JSON 形状是 MCP 工具错误响应
 // 的一部分，调整会直接影响调用方可见的契约）。
 type contractMismatchError struct {
-	Code          string                   `json:"code"`
-	Message       string                   `json:"message"`
-	Tool          string                   `json:"tool"`
-	NodeID        string                   `json:"node_id"`
-	NodeName      string                   `json:"node_name,omitempty"`
-	NodeVersion   string                   `json:"node_version,omitempty"`
-	PublishedHash string                   `json:"published_hash"`
-	NodeHash      string                   `json:"node_hash"`
+	Code          string                     `json:"code"`
+	Message       string                     `json:"message"`
+	Tool          string                     `json:"tool"`
+	NodeID        string                     `json:"node_id"`
+	NodeName      string                     `json:"node_name,omitempty"`
+	NodeVersion   string                     `json:"node_version,omitempty"`
+	PublishedHash string                     `json:"published_hash"`
+	NodeHash      string                     `json:"node_hash"`
 	Differences   []fleet.ContractDifference `json:"differences,omitempty"`
 }
 

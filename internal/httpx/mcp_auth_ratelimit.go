@@ -98,7 +98,7 @@ func (l *mcpAuthRateLimiter) middleware(clientIP func(*http.Request) string, nex
 // authFailureRecorder 观察下游是否写了 401；只关心状态码，不改写响应体。
 type authFailureRecorder struct {
 	http.ResponseWriter
-	status   int
+	status    int
 	onFailure func()
 }
 

@@ -17,7 +17,7 @@ import (
 	"github.com/uvwt/agenthub/internal/nodes"
 )
 
-const strongPassword = "correct-horse-battery"
+const strongPassword = "Corr7horseKp4z"
 
 type testEnv struct {
 	svc     *auth.Service
@@ -150,7 +150,7 @@ func TestWriteRequiresCSRF(t *testing.T) {
 		t.Fatalf("init admin: %v", err)
 	}
 	token, _ := e.loginAs(t, "root@example.com", strongPassword)
-	resp, _ := e.do(t, "POST", "/v1/admin/users", token, "", map[string]string{"username": "a@example.com", "password": "another-strong-pass1"})
+	resp, _ := e.do(t, "POST", "/v1/admin/users", token, "", map[string]string{"username": "a@example.com", "password": "Str0ngPass7xKm"})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("write without CSRF must be 403, got %d", resp.StatusCode)
 	}
@@ -166,7 +166,7 @@ func TestAdminUserManagementBoundary(t *testing.T) {
 	adminToken, adminCSRF := e.loginAs(t, "root@example.com", strongPassword)
 
 	resp, body := e.do(t, "POST", "/v1/admin/users", adminToken, adminCSRF, map[string]string{
-		"username": "alice@example.com", "password": "initial-pass-123456",
+		"username": "alice@example.com", "password": "Initial7passKp2z",
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create user: status %d body %v", resp.StatusCode, body)
@@ -184,7 +184,7 @@ func TestAdminUserManagementBoundary(t *testing.T) {
 	}
 
 	// 用 alice 登录（首登强制改密语义由业务层保证），验证普通用户越权被拒。
-	userToken, userCSRF := e.loginAndChangePassword(t, "alice@example.com", "initial-pass-123456", "alice-changed-123456")
+	userToken, userCSRF := e.loginAndChangePassword(t, "alice@example.com", "Initial7passKp2z", "Alice7changedKp9")
 	resp, _ = e.do(t, "GET", "/v1/admin/users", userToken, userCSRF, nil)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("user hitting admin endpoint must be 403, got %d", resp.StatusCode)
@@ -203,7 +203,7 @@ func TestResetMCPTokenImmediate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init admin: %v", err)
 	}
-	_, err = e.svc.CreateUser(ctx, admin.ID, "bob@example.com", "initial-pass-123456")
+	_, err = e.svc.CreateUser(ctx, admin.ID, "bob@example.com", "Initial7passKp2z")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestChangePasswordInvalidatesSessions(t *testing.T) {
 	}
 	token, csrf := e.loginAs(t, "root@example.com", strongPassword)
 	resp, _ := e.do(t, "POST", "/v1/auth/password", token, csrf, map[string]string{
-		"current_password": strongPassword, "new_password": "brand-new-passphrase1",
+		"current_password": strongPassword, "new_password": "Brand7newKp2zX",
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("change password: status %d", resp.StatusCode)

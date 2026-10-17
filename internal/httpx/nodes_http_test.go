@@ -22,12 +22,12 @@ func TestNodePairingLifecycle(t *testing.T) {
 
 	// 管理员建普通用户。
 	resp, body := e.do(t, "POST", "/v1/admin/users", adminToken, adminCSRF, map[string]string{
-		"username": "carol@example.com", "password": "initial-pass-123456",
+		"username": "carol@example.com", "password": "Initial7passKp2z",
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create user: %d %v", resp.StatusCode, body)
 	}
-	userToken, userCSRF := e.loginAndChangePassword(t, "carol@example.com", "initial-pass-123456", "carol-changed-123456")
+	userToken, userCSRF := e.loginAndChangePassword(t, "carol@example.com", "Initial7passKp2z", "Carol7changedKp4")
 
 	// 用户生成配对码。
 	resp, body = e.do(t, "POST", "/v1/nodes/pairing-codes", userToken, userCSRF, nil)
@@ -177,12 +177,12 @@ func TestDuplicatePairingReturnsConflict(t *testing.T) {
 	}
 	adminToken, adminCSRF := e.loginAs(t, "root@example.com", strongPassword)
 	resp, body := e.do(t, "POST", "/v1/admin/users", adminToken, adminCSRF, map[string]string{
-		"username": "dave@example.com", "password": "initial-pass-123456",
+		"username": "dave@example.com", "password": "Initial7passKp2z",
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create user: %d %v", resp.StatusCode, body)
 	}
-	userToken, userCSRF := e.loginAndChangePassword(t, "dave@example.com", "initial-pass-123456", "dave-changed-123456")
+	userToken, userCSRF := e.loginAndChangePassword(t, "dave@example.com", "Initial7passKp2z", "Dave7changedKp6")
 
 	pair := func(deviceID string) int {
 		resp, body := e.do(t, "POST", "/v1/nodes/pairing-codes", userToken, userCSRF, nil)

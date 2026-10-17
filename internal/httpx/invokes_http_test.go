@@ -18,7 +18,7 @@ func TestInvokeQueryBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init admin: %v", err)
 	}
-	alice, err := e.svc.CreateUser(ctx, admin.ID, "alice@example.com", "initial-pass-123456")
+	alice, err := e.svc.CreateUser(ctx, admin.ID, "alice@example.com", "Initial7passKp2z")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestInvokeQueryBoundaries(t *testing.T) {
 		t.Fatalf("unmatched user filter must be empty: %v", body)
 	}
 	// 用户侧查询不接受 user 参数（强制自身视角，即使伪造参数也无效）。
-	aliceToken, _ := e.loginAndChangePassword(t, "alice@example.com", "initial-pass-123456", "alice-changed-123456")
+	aliceToken, _ := e.loginAndChangePassword(t, "alice@example.com", "Initial7passKp2z", "Alice7changedKp9")
 	resp, body = e.do(t, "GET", "/v1/invokes?user=someone_else", aliceToken, "", nil)
 	if len(body["items"].([]any)) != 2 {
 		t.Fatalf("user param must be ignored on user view: %v", body)
@@ -100,7 +100,7 @@ func TestInvokeQueryBoundaries(t *testing.T) {
 
 	// 用户自己的视图：只见自己的 2 条，且不泄露他人记录。
 	// alice 上面已改过密，这里直接用新口令登录。
-	aliceToken, aliceCSRF := e.loginAs(t, "alice@example.com", "alice-changed-123456")
+	aliceToken, aliceCSRF := e.loginAs(t, "alice@example.com", "Alice7changedKp9")
 	resp, body = e.do(t, "GET", "/v1/invokes", aliceToken, "", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("user invokes: %d", resp.StatusCode)

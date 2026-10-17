@@ -30,17 +30,17 @@ func TestJourneyAdminCreatesUser(t *testing.T) {
 	if err != nil || initialized {
 		t.Fatalf("fresh hub must be uninitialized: %v", err)
 	}
-	if _, err := svc.InitializeAdmin(ctx, "root@example.com", "root-strong-passphrase"); err != nil {
+	if _, err := svc.InitializeAdmin(ctx, "root@example.com", "Root7strongKp3z"); err != nil {
 		t.Fatalf("init admin: %v", err)
 	}
-	alice, err := svc.CreateUser(ctx, "root", "alice@example.com", "alice-passphrase-1")
+	alice, err := svc.CreateUser(ctx, "root", "alice@example.com", "Alice7xKp2mQ9z")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	if !alice.MustChangePassword {
 		t.Fatal("created user must change password on first login")
 	}
-	if _, err := svc.Login(ctx, "alice@example.com", "alice-passphrase-1", "203.0.113.5"); err != nil {
+	if _, err := svc.Login(ctx, "alice@example.com", "Alice7xKp2mQ9z", "203.0.113.5"); err != nil {
 		t.Fatalf("alice login: %v", err)
 	}
 	token, err := svc.EnsureMCPToken(ctx, alice.ID)

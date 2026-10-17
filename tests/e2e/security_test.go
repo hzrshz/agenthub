@@ -68,10 +68,10 @@ func TestCrossTenantNodeIsolation(t *testing.T) {
 func TestDisableUserImmediate(t *testing.T) {
 	h := newHub(t)
 	ctx := context.Background()
-	if _, err := h.auth.InitializeAdmin(ctx, "root@example.com", "root-strong-passphrase"); err != nil {
+	if _, err := h.auth.InitializeAdmin(ctx, "root@example.com", "Root7strongKp3z"); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	alice, err := h.auth.CreateUser(ctx, "root", "alice@example.com", "alice-passphrase-1")
+	alice, err := h.auth.CreateUser(ctx, "root", "alice@example.com", "Alice7xKp2mQ9z")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
