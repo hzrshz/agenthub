@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"database/sql"
 	"context"
 	"errors"
 	"path/filepath"
@@ -256,5 +257,75 @@ func TestUsernameValidation(t *testing.T) {
 		if err := ValidateUsername(bad); err == nil {
 			t.Fatalf("username %q must be rejected", bad)
 		}
+	}
+}
+
+// IP 维度限流不能被"同 IP 下任意账号的一次成功登录"清零。
+//
+// 审查实测过的绕过：反复爆破把 IP 失败计数推到 N，攻击者用自己的合法账号
+// 成功登录一次后 login_throttles 的 ip 行整行消失，爆破额度被完全重置。
+// 修复后成功登录只让 IP 计数减半，不再清零。
+func TestLoginIPThrottleNotClearedByAnotherAccountsSuccess(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.InitializeAdmin(ctx, "root@example.com", strongPassword); err != nil {
+		t.Fatalf("initialize admin: %v", err)
+	}
+	if _, err := svc.CreateUser(ctx, "root", "attacker@example.com", "attacker-passphrase-1"); err != nil {
+		t.Fatalf("create attacker: %v", err)
+	}
+
+	const ip = "203.0.113.7"
+	ipKey := core.HashToken(ip)
+	failures := func() int {
+		t.Helper()
+		var n int
+		err := svc.db.QueryRowContext(ctx, `SELECT failures FROM login_throttles
+			WHERE key_type = 'ip' AND key_value = ?`, ipKey).Scan(&n)
+		if errors.Is(err, sql.ErrNoRows) {
+			return -1
+		}
+		if err != nil {
+			t.Fatalf("read ip throttle: %v", err)
+		}
+		return n
+	}
+
+	// 累积几次失败。两次之间把时钟拨到封锁窗口之外，
+	// 让下一次失败不会被上一次的 blocked_until 直接拦成 429。
+	// 累积 4 次失败把 IP 计数推高。每次之间推进时钟越过封锁窗口，
+	// 否则第 2 次起会被自己的 blocked_until 直接拦成 429，计数不再增长。
+	clock := time.Now()
+	svc.now = func() time.Time { return clock }
+	for i := 0; i < 4; i++ {
+		if _, err := svc.Login(ctx, "victim@example.com", "wrong-pass-x", ip); err == nil {
+			t.Fatal("wrong password must fail")
+		}
+		clock = clock.Add(30 * time.Minute)
+	}
+	before := failures()
+	if before <= 0 {
+		t.Fatalf("ip throttle must accumulate failures, got %d", before)
+	}
+
+	// 推进时钟越过封锁窗口（250ms 级），再让攻击者用自己的合法账号成功登录。
+	clock = clock.Add(10 * time.Second)
+	if _, err := svc.Login(ctx, "attacker@example.com", "attacker-passphrase-1", ip); err != nil {
+		t.Fatalf("attacker's own login must succeed: %v", err)
+	}
+	after := failures()
+	if after < 0 {
+		t.Fatal("ip throttle row must not be deleted by another account's successful login")
+	}
+	if after < 1 {
+		t.Fatalf("ip failures must never be fully reset by another account's login: before=%d after=%d", before, after)
+	}
+	// 关键回归：计数必须从高值下降。原始缺陷是把整行 DELETE，
+	// 修复后是减半——用多次失败把计数推高，才能看出"减半而非清零"。
+	if before <= 1 {
+		t.Fatalf("test setup: need accumulated failures to observe decay, got %d", before)
+	}
+	if after >= before {
+		t.Fatalf("ip failures must decay on success: before=%d after=%d", before, after)
 	}
 }

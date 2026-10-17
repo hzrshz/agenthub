@@ -4,12 +4,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/uvwt/agenthub/internal/config"
 )
 
 // pair 限流：同 IP 超过 PairAttemptsPerMinute 后 429 + Retry-After；不同 IP 不受影响。
 func TestPairRateLimiter(t *testing.T) {
 	limiter := newPairRateLimiter()
-	handler := limiter.middleware(func(w http.ResponseWriter, r *http.Request) {
+	handler := limiter.middleware(config.RemoteIP, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 

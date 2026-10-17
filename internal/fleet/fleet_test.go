@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"errors"
 	"context"
 	"path/filepath"
 	"testing"
@@ -291,5 +292,159 @@ func TestContractMismatchDetail(t *testing.T) {
 	}
 	if found {
 		t.Fatal("changed contract must not be in accepted set before reconcile")
+	}
+}
+
+// 名为 description 的**真实参数**不得被当成展示字段剔除。
+//
+// 归一化会剥掉 schema 对象上的 description（它是给 LLM 看的说明），
+// 但如果用户恰好有一个叫 description 的参数，剥掉它就等于把这个参数
+// 从契约里删掉：两个实际不同的 schema 会被判成兼容。nexusdock 有专门用例
+// 锁这一点，agenthub 此前缺失。
+func TestContractHashKeepsParameterNamedDescription(t *testing.T) {
+	withDescriptionParam := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"description": map[string]any{"type": "string"},
+		},
+		"required": []any{"description"},
+	}
+	withoutDescriptionParam := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
+	hash1, err := ToolContractHash(descriptorFor("t", withDescriptionParam))
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	hash2, err := ToolContractHash(descriptorFor("t", withoutDescriptionParam))
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if hash1 == hash2 {
+		t.Fatal("a real parameter named 'description' must stay in the contract hash")
+	}
+}
+
+// _meta.ui 与 annotations 不影响哈希；其他 _meta 必须影响。
+// ui 是纯展示绑定，节点间不一致不该判成不兼容；而非 ui 的 _meta
+// 可能承载执行语义，变了就必须能被发现。
+func TestContractHashMetaSemantics(t *testing.T) {
+	base := descriptorFor("t", map[string]any{"type": "object", "properties": map[string]any{}})
+	withUIMeta := base
+	withUIMeta.Meta = map[string]any{"ui": map[string]any{"icon": "star"}}
+	withUIMeta.Annotations = map[string]any{"readOnlyHint": true}
+
+	hashBase, _ := ToolContractHash(base)
+	hashUI, _ := ToolContractHash(withUIMeta)
+	if hashBase != hashUI {
+		t.Fatal("_meta.ui and annotations are presentation-only and must not change the hash")
+	}
+
+	withExecMeta := base
+	withExecMeta.Meta = map[string]any{"permission": "admin"}
+	hashExec, _ := ToolContractHash(withExecMeta)
+	if hashBase == hashExec {
+		t.Fatal("non-ui _meta must affect the hash")
+	}
+}
+
+// 合并：可选属性取并集时 outputSchema 也参与，required 保持原序且不丢项。
+// 只测 inputSchema 的旧用例会让 outputSchema 的合并行为完全无锁。
+func TestMergeFleetUnionsOutputSchema(t *testing.T) {
+	platformA := descriptorFor("t",
+		map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"a": map[string]any{"type": "string"}},
+			"required":   []any{"a"},
+		})
+	platformA.OutputSchema = map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"x": map[string]any{"type": "string"}},
+	}
+	platformB := descriptorFor("t",
+		map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"b": map[string]any{"type": "number"}},
+			"required":   []any{"b"},
+		})
+	platformB.OutputSchema = map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"y": map[string]any{"type": "number"}},
+	}
+
+	// required 不同即拒绝合并（保守语义，照搬 nexusdock）：
+	// 两边要求不同参数，合并出的 schema 无法同时满足，平台只能猜。
+	if _, _, err := MergeFleetToolDescriptors([]protocol.ToolDescriptor{platformA, platformB}); !errors.Is(err, ErrIncompatibleToolContract) {
+		t.Fatalf("conflicting required must be rejected, got %v", err)
+	}
+
+	// provider-only 的必填参数同样拒绝合并：只在 A 上 required 的参数，
+	// 调 B 时必然缺失。两条规则都是 nexusdock 的保守语义。
+	platformB.InputSchema["required"] = []any{"a"}
+	if _, _, err := MergeFleetToolDescriptors([]protocol.ToolDescriptor{platformA, platformB}); !errors.Is(err, ErrIncompatibleToolContract) {
+		t.Fatalf("provider-only required must be rejected, got %v", err)
+	}
+
+	// 两边都没有 required（归一化会丢弃空 required）时，
+	// input/output 的可选属性取并集——这是最典型的多平台合并场景。
+	delete(platformA.InputSchema, "required")
+	delete(platformB.InputSchema, "required")
+	merged, hashes, err := MergeFleetToolDescriptors([]protocol.ToolDescriptor{platformA, platformB})
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if len(hashes) != 2 {
+		t.Fatalf("both variants must be accepted, got %d hashes", len(hashes))
+	}
+	props, _ := merged.InputSchema["properties"].(map[string]any)
+	if props["a"] == nil || props["b"] == nil {
+		t.Fatalf("input properties must be unioned: %+v", props)
+	}
+	outProps, _ := merged.OutputSchema["properties"].(map[string]any)
+	if outProps["x"] == nil || outProps["y"] == nil {
+		t.Fatalf("output properties must be unioned: %+v", outProps)
+	}
+	required, _ := merged.InputSchema["required"].([]any)
+	if len(required) != 0 {
+		t.Fatalf("empty required must stay empty, got %+v", required)
+	}
+}
+
+// 漂移必须被拒绝合并：type 漂移 / enum 漂移 / additionalProperties 漂移。
+// 这些是不同的调用契约，合并会让平台按错误的 schema 构造参数。
+func TestMergeFleetRejectsDrift(t *testing.T) {
+	base := descriptorFor("t", map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode": map[string]any{"type": "string", "enum": []any{"a", "b"}},
+		},
+		"required": []any{"mode"},
+	})
+	cases := []struct {
+		label   string
+		mutate  func(map[string]any)
+	}{
+		{"type drift", func(s map[string]any) {
+			s["properties"].(map[string]any)["mode"].(map[string]any)["type"] = "number"
+		}},
+		{"enum drift", func(s map[string]any) {
+			s["properties"].(map[string]any)["mode"].(map[string]any)["enum"] = []any{"a", "c"}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			other := descriptorFor("t", map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"mode": map[string]any{"type": "string", "enum": []any{"a", "b"}},
+				},
+				"required": []any{"mode"},
+			})
+			tc.mutate(other.InputSchema)
+			if _, _, err := MergeFleetToolDescriptors([]protocol.ToolDescriptor{base, other}); !errors.Is(err, ErrIncompatibleToolContract) {
+				t.Fatalf("%s must be rejected, got %v", tc.label, err)
+			}
+		})
 	}
 }

@@ -4,7 +4,10 @@ package e2e
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/uvwt/agenthub/internal/auth"
@@ -13,6 +16,7 @@ import (
 )
 
 type hub struct {
+	db    *sql.DB
 	auth  *auth.Service
 	nodes *nodes.Store
 }
@@ -35,7 +39,7 @@ func newHub(t *testing.T) *hub {
 			t.Fatalf("seed: %v", err)
 		}
 	}
-	return &hub{auth: auth.NewService(db), nodes: nodes.NewStore(db)}
+	return &hub{db: db, auth: auth.NewService(db), nodes: nodes.NewStore(db)}
 }
 
 // 越权：Bob 不能用任何节点 API 触达 Alice 的节点。
@@ -89,16 +93,42 @@ func TestDisableUserImmediate(t *testing.T) {
 	if _, err := h.nodes.AuthenticateDeviceToken(ctx, node.DeviceToken); err == nil {
 		t.Fatal("disabled user's device token must be rejected immediately")
 	}
-	// 配对码立即作废：禁用用户的 pairing_codes 外键仍指向用户行，
-	// 但 Pair 在兑换后建立节点时外键校验用户状态语义由 connect 侧把关；
-	// 这里验证配对码兑换本身不再产生可用节点（节点随禁用用户无法通过认证）。
-	lateCode, _ := h.nodes.CreatePairingCode(ctx, alice.ID)
-	if _, err := h.nodes.Pair(ctx, nodes.PairInput{Code: lateCode.Code, DeviceID: "device-x-new", Name: "x"}); err == nil {
-		node, err := h.nodes.AuthenticateDeviceToken(ctx, "Bearer-never-issued")
-		_ = node
-		if err == nil {
-			t.Fatal("disabled user's pairing flow must not yield usable credentials")
-		}
+	// 配对码立即作废（DESIGN §4.3）。
+	// 这里断言的是"拿真实签发的码去兑换"，而不是"伪造 token 认证失败"——
+	// 后者无论实现对错都会通过，等于没测。
+	//
+	// 需要两枚码：一枚在禁用后签发（Pair 侧的用户状态校验拦下），
+	// 一枚在禁用前签发（RevokeOwnerAccess 显式作废拦下）。两条路径都要覆盖。
+	lateCode, err := h.nodes.CreatePairingCode(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("create late pairing code: %v", err)
+	}
+	if _, err := h.nodes.Pair(ctx, nodes.PairInput{Code: lateCode.Code, DeviceID: "device-late-01", Name: "late"}); !errors.Is(err, nodes.ErrPairingCodeInvalid) {
+		t.Fatalf("code issued after disable must be rejected as invalid, got %v", err)
+	}
+	// 禁用前签发的存量码也必须已被作废（RevokeOwnerAccess 是禁用路径的清理动作，
+	// 它还必须枚举出用户全部节点供调用方踢线）。
+	nodeIDs, err := h.nodes.RevokeOwnerAccess(ctx, alice.ID)
+	if err != nil {
+		t.Fatalf("revoke owner access: %v", err)
+	}
+	if len(nodeIDs) != 1 || nodeIDs[0] != node.ID {
+		t.Fatalf("revoke must enumerate the user's nodes for kick-out, got %v", nodeIDs)
+	}
+	var stillActive int
+	if err := h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pairing_codes
+		WHERE owner_user_id = ? AND used_at IS NULL`, alice.ID).Scan(&stillActive); err != nil {
+		t.Fatalf("count active pairing codes: %v", err)
+	}
+	if stillActive != 0 {
+		t.Fatalf("disable must void all unused pairing codes, %d still active", stillActive)
+	}
+	// 作废是持久的：恢复用户后旧码不能复活。
+	if err := h.auth.EnableUser(ctx, "root", alice.ID); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if _, err := h.nodes.Pair(ctx, nodes.PairInput{Code: code.Code, DeviceID: "device-revive-01", Name: "revive"}); err == nil {
+		t.Fatal("voided pairing code must not become usable after re-enabling the user")
 	}
 }
 
@@ -122,6 +152,58 @@ func TestPairingCodeReuseAndForgery(t *testing.T) {
 	// 伪造 token 拒绝。
 	if _, err := h.nodes.AuthenticateDeviceToken(ctx, "Bearer fake-token"); err == nil {
 		t.Fatal("forged device token must fail")
+	}
+}
+
+// 配对码并发双兑换：单次语义必须在并发下成立。
+//
+// 这条锁的是 UPDATE ... used_at IS NULL 的 RowsAffected 断言：两个事务可能都
+// 通过前面的 SELECT（SQLite 读不阻塞），若不检查命中行数，第二个会静默更新
+// 0 行后继续建节点，一个码产出两个节点 + 两个 device token。
+func TestPairingCodeConcurrentSingleUse(t *testing.T) {
+	h := newHub(t)
+	ctx := context.Background()
+	code, err := h.nodes.CreatePairingCode(ctx, "usr_alice")
+	if err != nil {
+		t.Fatalf("create pairing code: %v", err)
+	}
+
+	const racers = 4
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make([]error, racers)
+	deviceIDs := []string{"device-race-01", "device-race-02", "device-race-03", "device-race-04"}
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, results[i] = h.nodes.Pair(ctx, nodes.PairInput{Code: code.Code, DeviceID: deviceIDs[i], Name: "racer"})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	succeeded := 0
+	for i, err := range results {
+		if err == nil {
+			succeeded++
+			continue
+		}
+		// 并发失败方必须拿到业务错误，而不是泄漏的原始 SQLite 错误。
+		if !errors.Is(err, nodes.ErrPairingCodeInvalid) {
+			t.Fatalf("racer %d failed with unexpected error (want ErrPairingCodeInvalid): %v", i, err)
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("exactly one racer must succeed, got %d", succeeded)
+	}
+	var nodeCount int
+	if err := h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM nodes WHERE owner_user_id = 'usr_alice'`).Scan(&nodeCount); err != nil {
+		t.Fatalf("count nodes: %v", err)
+	}
+	if nodeCount != 1 {
+		t.Fatalf("a single pairing code must produce exactly one node, got %d", nodeCount)
 	}
 }
 
