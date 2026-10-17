@@ -27,19 +27,28 @@ jobs:
       - name: Build web bundle
         run: make web
 
-      # 产物漂移守门：提交的 web_dist 必须与源码构建结果一致，
-      # 防止"改了前端源码忘了重新构建就提交"。
+      # 产物漂移守门：已提交的 web_dist 必须与"现在重新构建的结果"一致。
+      # 失败模式是改了前端源码或依赖（package.json / vite.config.ts / tsconfig.json）
+      # 却忘了跑 make web 就提交——此时产物与源码已经不同步。
+      # CI 跑在干净 checkout 上，因此直接比较"重建后的产物"与 HEAD 中的产物。
       - name: Check embedded web bundle is up to date
         run: |
-          if [ -n "$(git status --porcelain internal/httpx/web_dist)" ]; then
-            echo "ERROR: internal/httpx/web_dist is stale. Run 'make web' and commit the rebuilt bundle."
-            git status --porcelain internal/httpx/web_dist
-            git diff --stat internal/httpx/web_dist | head -20
-            exit 1
+          if git diff --quiet HEAD -- internal/httpx/web_dist; then
+            echo "web_dist is up to date"
+            exit 0
           fi
+          echo "::error::internal/httpx/web_dist does not match a fresh build."
+          echo "Run 'make web' and commit the rebuilt bundle together with the source changes."
+          git diff --stat HEAD -- internal/httpx/web_dist | head -20
+          exit 1
 
       - name: Test
         run: go test ./... -count=1
+
+      # 并发守门：连接替换、inflight/rate map、fleet reconcileMu 都是并发热点，
+      # 普通 go test 检不出数据竞争。
+      - name: Test with race detector
+        run: go test ./... -race -count=1
 
       - name: Vet
         run: go vet ./...
@@ -57,5 +66,28 @@ jobs:
           fi
 
       # 容器构建冒烟：Dockerfile 保持可构建（不推送）。
+      # 必须先备齐 Dockerfile COPY 所需的 bin/ 与 certs/——之前这里直接
+      # `docker build .`，而仓库里没有这两个目录，冒烟要么红要么被跳过，
+      # 等于 Dockerfile 从未被真实验证过。
       - name: Docker build smoke
-        run: docker build -t agenthub:ci-smoke .
+        run: |
+          mkdir -p bin certs
+          go build -trimpath -ldflags "-s -w" -o bin/agenthub-linux-amd64 ./cmd/agenthub
+          docker create --name certs-src golang:1.26 true >/dev/null
+          docker cp certs-src:/etc/ssl/certs/ca-certificates.crt certs/ca-certificates.crt
+          docker cp certs-src:/usr/local/go/lib/time/zoneinfo.zip certs/zoneinfo.zip
+          docker rm -f certs-src >/dev/null
+          docker build -t agenthub:ci-smoke .
+          # 冒烟要真的能起来：HUB_PUBLIC_URL 用环回地址满足 config 校验。
+          docker run -d --name agenthub-smoke -p 8787:8787 \
+            -e HUB_PUBLIC_URL=http://127.0.0.1:8787 agenthub:ci-smoke
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:8787/healthz >/dev/null; then
+              echo "container is healthy"; break
+            fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8787/healthz >/dev/null || {
+            echo "ERROR: container did not become healthy"; docker logs agenthub-smoke; exit 1;
+          }
+          docker rm -f agenthub-smoke >/dev/null
