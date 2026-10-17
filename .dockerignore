@@ -9,9 +9,19 @@ web/node_modules/
 *.db-shm
 *.test
 *.out
-agenthub
-agenthub-linux-*
 Dockerfile
 .dockerignore
 README.md
 docs/
+
+# 只排除仓库根目录里散落的本地产物（本地 go build 的 agenthub、make
+# release-linux 的 agenthub-linux-*）。这些模式**不能**写成裸的
+# "agenthub-linux-*"——docker 的忽略模式对任意层级生效，会把 Dockerfile
+# 真正需要的 bin/agenthub-linux-<arch> 一起排除掉，导致镜像里 /agenthub
+# 缺失（CI 表现为容器启动即 "exec /agenthub: no such file or directory"，
+# 而 Dockerfile 本身构建成功，最容易被误判为运行层问题）。
+# 用根锚定的 / 前缀把作用域限制在仓库根，bin/ 目录不受影响。
+/agenthub
+/agenthub-linux-*
+/agenthub-darwin-*
+/agenthub-windows-*

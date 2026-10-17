@@ -72,11 +72,16 @@ jobs:
       - name: Docker build smoke
         run: |
           mkdir -p bin certs
-          go build -trimpath -ldflags "-s -w" -o bin/agenthub-linux-amd64 ./cmd/agenthub
+          # 显式指定 GOOS/GOARCH：镜像里必须是 linux/amd64，不能依赖
+          # runner 的隐含环境，否则容器启动会报 exec 格式错误。
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w" -o bin/agenthub-linux-amd64 ./cmd/agenthub
           docker create --name certs-src golang:1.26 true >/dev/null
           docker cp certs-src:/etc/ssl/certs/ca-certificates.crt certs/ca-certificates.crt
           docker cp certs-src:/usr/local/go/lib/time/zoneinfo.zip certs/zoneinfo.zip
           docker rm -f certs-src >/dev/null
+          # 构建后确认二进制真的进了镜像层——.dockerignore 的忽略模式对
+          # 任意层级生效，写错会让 COPY 静默拿到缺失文件。
           docker build -t agenthub:ci-smoke .
           # 冒烟要真的能起来：HUB_PUBLIC_URL 用环回地址满足 config 校验。
           docker run -d --name agenthub-smoke -p 8787:8787 \
@@ -89,5 +94,9 @@ jobs:
           done
           curl -sf http://127.0.0.1:8787/healthz >/dev/null || {
             echo "ERROR: container did not become healthy"; docker logs agenthub-smoke; exit 1;
+          }
+          # 内嵌静态资源（go:embed 的 web_dist）必须能取到，否则前端白屏。
+          curl -sf -o /dev/null http://127.0.0.1:8787/fonts/fonts.css || {
+            echo "ERROR: embedded web assets are not served"; exit 1;
           }
           docker rm -f agenthub-smoke >/dev/null
