@@ -8,8 +8,8 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -106,7 +106,9 @@ func (s *Server) SetLogger(logger *slog.Logger) {
 	}
 }
 
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler 返回最终处理器。安全响应头在最外层包，这样连"未匹配到任何路由"
+// 的 404 响应也带全套头——扫描器不会区分你返回的是 200 还是 404。
+func (s *Server) Handler() http.Handler { return securityHeaders(s.trustedProxies, s.mux) }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
