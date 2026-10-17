@@ -39,6 +39,7 @@ HUB_DATA_DIR=/var/lib/agenthub HUB_PUBLIC_URL=https://hub.example.com \
 | `HUB_PUBLIC_URL` | 是 | hub 对外访问的 origin（无路径）。**生产必须 `https://`；测试允许 `http://localhost` 或 `http://<局域网IP>`**，公网 http 域名会被拒绝 |
 | `HUB_DATA_DIR` | 否 | 数据目录（SQLite 单文件），默认 `~/.agenthub`（容器内 `/data`） |
 | `HUB_LISTEN` | 否 | 监听地址，默认 `127.0.0.1:8787`（容器内 `0.0.0.0:8787`） |
+| `HUB_TRUSTED_PROXY_CIDRS` | 否 | 可信反代网段（逗号分隔的 CIDR），**用了反向代理就应设置**。只有请求来自这些网段时 hub 才采信 `X-Forwarded-For` / `X-Forwarded-Proto`，用于按 IP 限流与 HSTS 判定；未设置则一律不采信（客户端可伪造这些头绕过限流）。宿主机反代填 `127.0.0.1/32,::1/128`，compose 网段按实际网段填 |
 
 ### HUB_PUBLIC_URL 的生效范围与修改
 
@@ -136,6 +137,39 @@ agentdock nexus pair --endpoint https://hub.example.com --code <新配对码>
 
 数据目录沿用同一个 `HUB_DATA_DIR` 即可保留账号与节点记录；如果想从干净环境开始，换一个新的 `HUB_DATA_DIR` 重新 `admin init`。
 
+### 用 Caddy 做反代（推荐生产部署）
+
+Caddy 自动申请并续期证书，只需一个 Caddyfile。**注意 Caddy 默认不下发
+HSTS，需要显式配置**（实测 v2.6.4 确认）：
+
+```caddyfile
+hub.example.com {
+  encode zstd gzip
+
+  # HSTS：Caddy 不会自动下发，必须显式声明。
+  # max-age 一年。不加 includeSubDomains / preload——反代未必覆盖全部子域，
+  # 预加载指令一旦提交到浏览器列表就难以撤销。
+  header Strict-Transport-Security "max-age=31536000"
+
+  reverse_proxy 127.0.0.1:8787
+}
+```
+
+Caddy 会自动代理 `X-Forwarded-Proto`，因此 hub 能正确识别这是 HTTPS 请求并
+自行下发 HSTS（两者同值，重复无害）。应用层的其余安全响应头
+（CSP / X-Frame-Options / nosniff 等）由 hub 直接下发，经反代后依然存在
+——已实测确认 Caddy 的 `reverse_proxy` 不会覆盖后端响应头。
+
+配合 hub 侧需要设置可信反代来源，否则 hub 会忽略 `X-Forwarded-Proto`
+与 `X-Forwarded-For`（防止客户端伪造绕过限流）：
+
+```bash
+HUB_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128 \
+HUB_LISTEN=127.0.0.1:8787 \
+HUB_PUBLIC_URL=https://hub.example.com \
+  ./agenthub serve
+```
+
 ### 备份
 
 停机复制 `HUB_DATA_DIR/control.db` 单文件即可，不做在线备份。
@@ -154,10 +188,36 @@ docker run --rm -it -v agenthub-data:/data \
   ghcr.io/<owner>/agenthub:latest admin init
 
 # 启动服务（容器内默认 HUB_LISTEN=0.0.0.0:8787，HUB_DATA_DIR=/data）
-docker run -d --name agenthub -p 8787:8787 \
+#
+# 端口绑定到宿主【回环】：8787 不发布到公网，只有本机的反代（Caddy/nginx）能
+# 访问。容器内必须保持监听 0.0.0.0 —— 容器有独立网络命名空间，改成 127.0.0.1
+# 会导致端口映射与同网络的其他容器（反代）都连不上。
+docker run -d --name agenthub -p 127.0.0.1:8787:8787 \
   -v agenthub-data:/data \
   -e HUB_PUBLIC_URL=https://hub.example.com \
+  -e HUB_TRUSTED_PROXY_CIDRS=127.0.0.1/32 \
   ghcr.io/<owner>/agenthub:latest serve
+```
+
+若反向代理也跑在容器里，让两者处于同一 Docker 网络用服务名互访即可，
+此时可以不发布端口（比发布到回环更严格）：
+
+```yaml
+# compose 片段
+services:
+  agenthub:
+    image: ghcr.io/<owner>/agenthub:latest
+    # 不写 ports：同网络内用服务名互访，宿主完全访问不到
+    environment:
+      HUB_PUBLIC_URL: https://hub.example.com
+      HUB_TRUSTED_PROXY_CIDRS: 172.16.0.0/12   # 覆盖 compose 网段
+    volumes: [agenthub-data:/data]
+  caddy:
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443"]
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro"]
+volumes:
+  agenthub-data:
 ```
 
 本地构建镜像：`docker build -t agenthub .`（多阶段：node 构建前端 → golang 静态编译 → distroless 运行层）。
@@ -202,3 +262,36 @@ GitHub Actions：`ci.yml` 在每次推送时做测试 + vet + loong64 静态编�
 - 配对码绑定用户、10 分钟、单次；用户禁用 = 节点断线 + MCP Token 失效 + 会话吊销，全部即时。
 - 调用记录只存元数据（时间/用户/节点/工具/结果/耗时），工具参数与返回内容**绝不落库**；30 天滚动清理。
 - 默认配额：每用户 10 节点、MCP 60 req/min、每节点在途 16、单条消息 10MB、invoke 120s 超时。
+
+### 国密算法：暂未实现（后续处理）
+
+当前**全部使用国际算法**，没有任何国密（SM2/SM3/SM4）实现：
+
+| 用途 | 当前算法 |
+|---|---|
+| 口令哈希 | argon2id |
+| Token / 配对码 / 会话哈希 | SHA-256 |
+| 传输加密 | 由反代终结 TLS（RSA/ECDSA + AES-GCM） |
+
+**这是否构成等保二级的问题？** 等保二级（GB/T 22239-2019）本身**未强制要求
+国密算法**；强制要求国密通常出现在等保三级及以上，或由行业主管部门的
+信创/密码应用要求单独提出。因此：
+
+- 按等保二级测评，目前的实现不因"没有国密"被判定为不合规。
+- 若上级有独立的密码应用要求（信创清单、密评），则需要在后续版本补齐。
+
+**若要补齐，改动范围**（供后续排期参考，非当前承诺）：
+
+1. **SM3 替代 SHA-256**：影响 `core.HashToken`（token/配对码/会话哈希），
+   以及 `nodes.device_token_hash`、`user_sessions.token_hash`、
+   `user_mcp_tokens.token_hash`、`published_tool_variants.semantic_hash`。
+   注意语义哈希的**跨版本稳定性**——已入库的哈希值无法反推，切换算法需要
+   一次性迁移或强制重置全部凭据。
+2. **SM4 替代对称加密**：当前 hub 不做对称加密（敏感值一律只存哈希），
+   若新增"可解密的字段加密"需求（如配置项加密存储）才需要。
+3. **SM2**：仅在需要签发/验签 X.509 证书时使用；当前 hub **不签发证书**
+   （TLS 完全交给反代），因此这一项大概率不需要动。
+
+因此更务实的路径是：先确认密码应用的具体要求范围（第 2 层是"传输与
+存储的密码算法合规"，还是仅要求"通信机密性"），再决定是全面替换还是
+仅在 TLS 层由反代接入国密网关/TLCP。
