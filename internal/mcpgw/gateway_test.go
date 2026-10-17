@@ -396,13 +396,6 @@ func TestMCPContractMismatchRejected(t *testing.T) {
 	drifted := env.connectToolNode(t, "usr_alice", "device-alice-02", true)
 	defer drifted.Close()
 
-	// 兼容节点仍可调用（漂移不得污染已公开契约）。
-	if _, err := env.gateway.callNodeTool(ctx, "usr_alice", "echo", map[string]any{
-		"node_id": compatibleID, "message": "hi",
-	}); err != nil {
-		t.Fatalf("compatible node must still be callable: %v", err)
-	}
-
 	// 对漂移节点调用：必须被契约复核拦下，并带结构化 mismatch。
 	nodeList, err = env.nodes.ListByOwner(ctx, "usr_alice")
 	if err != nil || len(nodeList) != 2 {
@@ -414,6 +407,17 @@ func TestMCPContractMismatchRejected(t *testing.T) {
 			driftedID = n.ID
 		}
 	}
+	// 契约复核发生在"节点在线"判定之后，因此两个节点都必须先 ready。
+	waitForOnline(t, env, compatibleID)
+	waitForOnline(t, env, driftedID)
+
+	// 兼容节点仍可调用（漂移不得污染已公开契约）。
+	if _, err := env.gateway.callNodeTool(ctx, "usr_alice", "echo", map[string]any{
+		"node_id": compatibleID, "message": "hi",
+	}); err != nil {
+		t.Fatalf("compatible node must still be callable: %v", err)
+	}
+
 	_, err = env.gateway.callNodeTool(ctx, "usr_alice", "echo", map[string]any{
 		"node_id": driftedID, "message": "hi",
 	})
@@ -461,6 +465,23 @@ func mustJSON(t *testing.T, value any) []byte {
 }
 
 // waitForPublish 等待 fleet 公开契约就绪（hello 回调是异步的）。
+// waitForOnline 等待节点在 Hub 中登记为 ready。
+//
+// 不能省略：Hub.Online 以 ready 为准，而 ready 与 connectToolNode 返回之间
+// 存在毫秒级窗口。CI runner 负载高时这个窗口会被放大——直接调用会拿到
+// NODE_OFFLINE 而不是本用例真正要断言的契约复核结果（flaky 的来源）。
+func waitForOnline(t *testing.T, env *gwEnv, nodeID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if env.hub.Online(nodeID) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("node %s did not come online within 10s", nodeID)
+}
+
 func waitForPublish(t *testing.T, env *gwEnv, owner, tool string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
