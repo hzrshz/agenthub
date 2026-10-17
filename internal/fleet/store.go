@@ -108,7 +108,46 @@ func (s *Store) loadVariants(ctx context.Context, ownerUserID, toolName string) 
 		}
 		hashes = append(hashes, hash)
 	}
-	return hashes, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 变体集合为空时回退到当前 descriptor 的真实契约哈希（照搬 nexusdock
+	// LoadPublished 的兜底）：旧库或变体行丢失时若返回空集合，调用前的契约复核
+	// 会把**每一次**调用都判成不兼容，工具全面不可用；回退至少承认"当前公开的
+	// 那份契约"是兼容的，避免整体失效。
+	if len(hashes) == 0 {
+		descriptorJSON, err := s.loadDescriptor(ctx, ownerUserID, toolName)
+		if err != nil {
+			return hashes, err
+		}
+		if descriptorJSON == "" {
+			return hashes, nil
+		}
+		var descriptor protocol.ToolDescriptor
+		if err := json.Unmarshal([]byte(descriptorJSON), &descriptor); err != nil {
+			return hashes, fmt.Errorf("解析公开契约 %s: %w", toolName, err)
+		}
+		hash, err := ToolContractHash(descriptor)
+		if err != nil {
+			return hashes, nil
+		}
+		return []string{hash}, nil
+	}
+	return hashes, nil
+}
+
+// loadDescriptor 读取已公开契约的原始 JSON；不存在返回空串。
+func (s *Store) loadDescriptor(ctx context.Context, ownerUserID, toolName string) (string, error) {
+	var descriptorJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT descriptor_json FROM published_tool_contracts
+		WHERE owner_user_id = ? AND tool_name = ?`, ownerUserID, toolName).Scan(&descriptorJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("读取公开契约 %s: %w", toolName, err)
+	}
+	return descriptorJSON, nil
 }
 
 // Save 把合并结果落库：契约 + 全量替换变体集合，单事务。

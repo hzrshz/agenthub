@@ -94,6 +94,22 @@ func (e *testEnv) loginAs(t *testing.T, username, password string) (token, csrf 
 	return token, csrfRaw
 }
 
+// loginAndChangePassword 走完"首登强制改密"流程并返回改密后的新会话凭证。
+// 业务接口在 must_change_password 未清除前一律 403，因此任何要调用业务接口的
+// 测试都必须经由这个辅助方法，而不是拿初始密码直接登录。
+func (e *testEnv) loginAndChangePassword(t *testing.T, username, initialPassword, newPassword string) (token, csrf string) {
+	t.Helper()
+	token, csrf = e.loginAs(t, username, initialPassword)
+	// 改密会吊销该用户全部会话，所以改密后必须重新登录拿新会话。
+	resp, body := e.do(t, "POST", "/v1/auth/password", token, csrf, map[string]string{
+		"current_password": initialPassword, "new_password": newPassword,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("change password %s: status %d body %v", username, resp.StatusCode, body)
+	}
+	return e.loginAs(t, username, newPassword)
+}
+
 // 完整登录→whoami 流程；Cookie 即凭证。
 func TestLoginAndMe(t *testing.T) {
 	e := newTestEnv(t)
@@ -168,7 +184,7 @@ func TestAdminUserManagementBoundary(t *testing.T) {
 	}
 
 	// 用 alice 登录（首登强制改密语义由业务层保证），验证普通用户越权被拒。
-	userToken, userCSRF := e.loginAs(t, "alice@example.com", "initial-pass-123456")
+	userToken, userCSRF := e.loginAndChangePassword(t, "alice@example.com", "initial-pass-123456", "alice-changed-123456")
 	resp, _ = e.do(t, "GET", "/v1/admin/users", userToken, userCSRF, nil)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("user hitting admin endpoint must be 403, got %d", resp.StatusCode)

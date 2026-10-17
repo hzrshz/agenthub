@@ -52,7 +52,8 @@ func (l *pairRateLimiter) allow(ip string) (bool, int) {
 }
 
 // middleware 包装 HTTP 处理器执行按 IP 限流。
-func (l *pairRateLimiter) middleware(next http.HandlerFunc) http.HandlerFunc {
+// clientIP 由 Server 注入（其语义受可信反代配置影响，见 config.ClientIP）。
+func (l *pairRateLimiter) middleware(clientIP func(*http.Request) string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
 		if ip == "" {

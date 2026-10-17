@@ -29,6 +29,9 @@ import (
 // NodesContextToolName 是中心工具名：返回用户节点清单与在线状态。
 const NodesContextToolName = "nodes_context"
 
+// CodeToolContractMismatch 是调用前契约复核失败的错误码。
+const CodeToolContractMismatch core.ErrorCode = "TOOL_CONTRACT_MISMATCH"
+
 // Gateway 是 MCP 网关。
 type Gateway struct {
 	auth    *auth.Service
@@ -82,10 +85,19 @@ func (g *Gateway) Handler() http.Handler {
 			writeMCPError(w, http.StatusUnauthorized, string(core.ErrorCodeOf(err)), "mcp token invalid")
 			return
 		}
-		if !g.allowRequest(user.ID) {
-			writeMCPError(w, http.StatusTooManyRequests, "RATE_LIMITED", "mcp request rate limit exceeded")
-			return
-		}
+if !g.allowRequest(user.ID) {
+		writeMCPError(w, http.StatusTooManyRequests, "RATE_LIMITED", "mcp request rate limit exceeded")
+		return
+	}
+	// 在途超限在这里预检并直接 429（DESIGN §6 "超限立即 429"）。
+	// 为什么必须在 Handler 层：MCP 的一次 tools/call 响应状态码在请求开始时就
+	// 确定了，进了工具处理器再想返回 429 只能得到 HTTP 200 + isError，
+	// 客户端的 HTTP 层限流重试策略（按状态码）不会生效。
+	if !g.userHasInflightCapacity(user.ID) {
+		w.Header().Set("Retry-After", "1")
+		writeMCPError(w, http.StatusTooManyRequests, string(core.CodeTooManyRequests), "concurrent request limit reached")
+		return
+	}
 		// 每请求临时 server：按用户动态注册工具面（Stateless 模式下 handler
 		// 只在本次请求内使用该 server，注册成本低且天然用户隔离）。
 		server := mcp.NewServer(&mcp.Implementation{Name: "agenthub", Version: "1"}, &mcp.ServerOptions{})
@@ -162,11 +174,29 @@ func (g *Gateway) registerUserTools(ctx context.Context, userID string, server *
 			if !ok {
 				continue
 			}
-			server.AddTool(nodeMCPTool(published.Descriptor), g.nodeToolHandler(userID, name))
+			g.safeAddTool(server, nodeMCPTool(published.Descriptor), g.nodeToolHandler(userID, name))
 		}
 	}
-	server.AddTool(nodesContextTool(), g.nodesContextHandler(userID))
+	g.safeAddTool(server, nodesContextTool(), g.nodesContextHandler(userID))
 	return nil
+}
+
+// safeAddTool 包装 SDK 的 AddTool：节点提供的 schema 是外部输入，
+// SDK 对缺 type / 非 object 的 schema 直接 panic，而这里每请求都会装配工具面。
+// 单个畸形 descriptor 不能打穿整个 /mcp 请求——跳过它并记日志，其余工具照常可用。
+func (g *Gateway) safeAddTool(server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHandler) {
+	if tool == nil {
+		return
+	}
+	name := tool.Name
+	defer func() {
+		if r := recover(); r != nil {
+			if g.logger != nil {
+				g.logger.Warn("跳过非法工具契约（节点 schema 畸形）", "tool", name, "panic", fmt.Sprint(r))
+			}
+		}
+	}()
+	server.AddTool(tool, handler)
 }
 
 // nodeMCPTool 把节点工具描述符转成 MCP Tool 并注入必填 node_id。
@@ -196,36 +226,51 @@ func nodeMCPTool(descriptor protocol.ToolDescriptor) *mcp.Tool {
 }
 
 // injectNodeIDSchema 复制 inputSchema 并注入必填 node_id（照搬 nexusdock nodeInputSchema）。
+//
+// 安全边界：节点的 inputSchema 是外部输入，畸形契约（nil、缺 type、type 不是 object）
+// 绝不能原样透传给 MCP SDK——AddTool 对非 object schema 直接 panic，而工具面在每个
+// /mcp 请求内装配，单个畸形 descriptor 就能让该用户所有调用持续失败。因此这里强制
+// 补齐 {"type":"object"} 底座；SDK 侧 panic 的最后一道防线见 safeAddTool。
+//
+// 深拷贝用 JSON round-trip：published.Descriptor 可能被多节点共享（fleet 合并结果），
+// 浅拷贝会让注入的 node_id 污染内存中的公开契约。
 func injectNodeIDSchema(schema map[string]any) map[string]any {
-	cloned := make(map[string]any, len(schema)+2)
-	for key, value := range schema {
-		cloned[key] = value
+	encoded, _ := json.Marshal(schema)
+	cloned := map[string]any{"type": "object"}
+	// json.Unmarshal("null", &cloned) 会把整个 cloned 置为 nil map，
+	// 之后任何赋值都是 "assignment to entry in nil map" panic——
+	// nil schema 恰好序列化成 "null"。这里解码到临时变量再合并，
+	// 保证 cloned 始终是非 nil map。
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err == nil {
+		for key, value := range decoded {
+			cloned[key] = value
+		}
 	}
-	properties, _ := cloned["properties"].(map[string]any)
-	if properties == nil {
-		properties = map[string]any{}
+	// `"properties": null` 或类型不是对象时，类型断言拿到的是 nil map，
+	// 同样必须重建。
+	if properties, ok := cloned["properties"].(map[string]any); ok && properties != nil {
+		properties["node_id"] = map[string]any{
+			"type":        "string",
+			"description": "目标 AgentDock 节点 ID，来自 nodes_context 返回的节点列表。",
+		}
 	} else {
-		propertiesCopy := make(map[string]any, len(properties)+1)
-		for key, value := range properties {
-			propertiesCopy[key] = value
-		}
-		properties = propertiesCopy
-	}
-	properties["node_id"] = map[string]any{
-		"type":        "string",
-		"description": "目标 AgentDock 节点 ID，来自 nodes_context 返回的节点列表。",
-	}
-	cloned["properties"] = properties
-	required := make([]string, 0)
-	if existing, ok := cloned["required"].([]any); ok {
-		for _, item := range existing {
-			if name, ok := item.(string); ok && name != "node_id" {
-				required = append(required, name)
-			}
+		cloned["properties"] = map[string]any{
+			"node_id": map[string]any{
+				"type":        "string",
+				"description": "目标 AgentDock 节点 ID，来自 nodes_context 返回的节点列表。",
+			},
 		}
 	}
-	required = append(required, "node_id")
-	cloned["required"] = required
+	// 同理：required 必须是 []any 才能 append。
+	required, _ := cloned["required"].([]any)
+	for _, value := range required {
+		if name, ok := value.(string); ok && name == "node_id" {
+			// 已含 node_id：直接返回，避免 required 里出现重复项。
+			return cloned
+		}
+	}
+	cloned["required"] = append(required, "node_id")
 	return cloned
 }
 
@@ -269,7 +314,9 @@ func (g *Gateway) callNodeTool(ctx context.Context, userID, toolName string, arg
 		return nil, fmt.Errorf("node %s is disabled", nodeID)
 	}
 	if !g.hub.Online(nodeID) {
-		return nil, &core.CodedError{Code: core.CodeNodeOffline, Message: "节点当前离线"}
+		// retryable=true（DESIGN §3.3）：节点离线是暂态故障，平台应退避后重试，
+		// 而不是当成永久错误放弃整个工具。
+		return nil, core.NewRetryableError(core.CodeNodeOffline, "节点当前离线", nil)
 	}
 	if !containsString(node.Capabilities, toolName) {
 		return nil, fmt.Errorf("node %s does not provide tool %s", nodeID, toolName)
@@ -292,20 +339,34 @@ func (g *Gateway) callNodeTool(ctx context.Context, userID, toolName string, arg
 	if err != nil {
 		return nil, err
 	}
-	if !containsHash(published.AcceptedSemanticHashes, nodeHash) {
-		differences := fleet.ContractDifferences(published.Descriptor, target)
+	if !fleet.ContainsHash(published.AcceptedSemanticHashes, nodeHash) {
 		return nil, &core.CodedError{
-			Code:    "TOOL_CONTRACT_MISMATCH",
-			Message: fmt.Sprintf("目标节点工具 %s 的契约不在当前兼容集合内（published=%s node=%s），请刷新工具列表或升级该设备的 AgentDock", toolName, published.ContractHash, nodeHash),
-			Err:     contractMismatchError{differences: differences},
+			Code: CodeToolContractMismatch,
+			Message: fmt.Sprintf("目标节点工具 %s 的契约不在当前兼容集合内，请刷新工具列表或升级该设备的 AgentDock", toolName),
+			// 契约漂移不是"稍后重试能好"的错误：重试多少次结果都一样，
+			// 必须让平台升级 AgentDock 或重新加载工具面。
+			Retryable: false,
+			Err: contractMismatchError{
+				Code:          string(CodeToolContractMismatch),
+				Message:       fmt.Sprintf("目标节点工具 %s 的契约不在当前兼容集合内，请刷新工具列表或升级该设备的 AgentDock", toolName),
+				Tool:          toolName,
+				NodeID:        node.ID,
+				NodeName:      node.Name,
+				NodeVersion:   node.Version,
+				PublishedHash: published.ContractHash,
+				NodeHash:      nodeHash,
+				Differences:   fleet.ContractDifferences(published.Descriptor, target),
+			},
 		}
 	}
 
 	// 并发在途上限：超过即快速失败，防止单节点拖垮该用户的整条连接。
-	if !g.acquireInflight(nodeID) {
-		return nil, &core.CodedError{Code: core.CodeTooManyRequests, Message: "节点并发请求已达上限"}
+	// 两个维度都要查（DESIGN §6）：每节点 16 防单节点拖垮，
+	// 每用户 16 防压力被分散到自己的多个节点上绕过单点限制。
+	if !g.acquireInflight(userID, nodeID) {
+		return nil, core.NewRetryableError(core.CodeTooManyRequests, "并发请求已达上限（节点或用户维度），请稍后重试", nil)
 	}
-	defer g.releaseInflight(nodeID)
+	defer g.releaseInflight(userID, nodeID)
 
 	delete(arguments, "node_id")
 	invokeCtx, cancel := context.WithTimeout(ctx, config.InvokeTimeout)
@@ -370,25 +431,39 @@ func (g *Gateway) nodesContextHandler(userID string) mcp.ToolHandler {
 	}
 }
 
-// acquireInflight / releaseInflight 每节点并发计数。
-func (g *Gateway) acquireInflight(nodeID string) bool {
+// userHasInflightCapacity 报告该用户当前在途请求是否还有余量。
+// 只看用户维度：节点维度要到 callNodeTool 知道目标节点后才能判断。
+func (g *Gateway) userHasInflightCapacity(userID string) bool {
 	g.inflightMu.Lock()
 	defer g.inflightMu.Unlock()
-	if g.inflight[nodeID] >= config.MaxInflightPerNode {
+	return g.inflight["user:"+userID] < config.MaxInflightPerUser
+}
+
+// acquireInflight / releaseInflight 在途计数（节点维度 + 用户维度）。
+// 任一维度已满即拒绝，且两者要么一起加要么一起不加，避免计数泄漏。
+func (g *Gateway) acquireInflight(userID, nodeID string) bool {
+	g.inflightMu.Lock()
+	defer g.inflightMu.Unlock()
+	userKey := "user:" + userID
+	nodeKey := "node:" + nodeID
+	if g.inflight[nodeKey] >= config.MaxInflightPerNode || g.inflight[userKey] >= config.MaxInflightPerUser {
 		return false
 	}
-	g.inflight[nodeID]++
+	g.inflight[nodeKey]++
+	g.inflight[userKey]++
 	return true
 }
 
-func (g *Gateway) releaseInflight(nodeID string) {
+func (g *Gateway) releaseInflight(userID, nodeID string) {
 	g.inflightMu.Lock()
 	defer g.inflightMu.Unlock()
-	if g.inflight[nodeID] > 0 {
-		g.inflight[nodeID]--
-	}
-	if g.inflight[nodeID] == 0 {
-		delete(g.inflight, nodeID)
+	for _, key := range []string{"user:" + userID, "node:" + nodeID} {
+		if g.inflight[key] > 0 {
+			g.inflight[key]--
+		}
+		if g.inflight[key] == 0 {
+			delete(g.inflight, key)
+		}
 	}
 }
 
@@ -406,12 +481,27 @@ func UserIDFromContext(ctx context.Context) string {
 	return value
 }
 
-type contractMismatchError struct{ differences []fleet.ContractDifference }
+// contractMismatchError 是调用前契约复核失败的结构化详情，
+// 字段与 nexusdock ToolContractMismatch 对齐（JSON 形状是 MCP 工具错误响应
+// 的一部分，调整会直接影响调用方可见的契约）。
+type contractMismatchError struct {
+	Code          string                   `json:"code"`
+	Message       string                   `json:"message"`
+	Tool          string                   `json:"tool"`
+	NodeID        string                   `json:"node_id"`
+	NodeName      string                   `json:"node_name,omitempty"`
+	NodeVersion   string                   `json:"node_version,omitempty"`
+	PublishedHash string                   `json:"published_hash"`
+	NodeHash      string                   `json:"node_hash"`
+	Differences   []fleet.ContractDifference `json:"differences,omitempty"`
+}
 
-func (contractMismatchError) Error() string { return "tool contract mismatch" }
-
-// Differences 供上层把结构化差异写入错误详情。
-func (e contractMismatchError) Differences() []fleet.ContractDifference { return e.differences }
+func (e contractMismatchError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	return "tool contract mismatch"
+}
 
 func traceparentOf(ctx context.Context) string {
 	value, _ := ctx.Value(traceparentKey{}).(string)
@@ -492,9 +582,17 @@ func gatewayToolResult(name string, result map[string]any, err error) (*mcp.Call
 	if err != nil {
 		result["tool"] = name
 		result["error"] = err.Error()
-		if mismatch, ok := err.(*core.CodedError); ok && mismatch.Code == "TOOL_CONTRACT_MISMATCH" {
-			if cm, canCast := mismatch.Err.(contractMismatchError); canCast {
-				result["contract_differences"] = cm.Differences()
+		// 结构化错误字段：平台据此程序化分支，不解析 error 字符串。
+		// DESIGN §3.3 要求 NODE_OFFLINE 带 retryable=true，让 Agent 知道可重试。
+		var coded *core.CodedError
+		if errors.As(err, &coded) {
+			result["code"] = string(coded.Code)
+			result["retryable"] = coded.Retryable
+			var mismatch contractMismatchError
+			if coded.Code == CodeToolContractMismatch && errors.As(coded.Err, &mismatch) {
+				// 用 errors.As 而非类型断言：CodedError 有 Unwrap，
+				// 一旦加包装层类型断言会静默丢掉全部差异。
+				result["tool_contract_mismatch"] = mismatch
 			}
 		}
 	}

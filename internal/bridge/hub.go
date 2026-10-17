@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,7 +27,37 @@ import (
 var (
 	ErrNodeOffline      = errors.New("节点当前离线")
 	ErrNodeDisconnected = errors.New("节点连接已断开")
+	// ErrProtocolMismatch 表示节点的协议版本低于 hub 的最低要求。
+	// 与内部原因区分开，是为了让 HTTP 层能把它映射成可读的 400 + 升级指引，
+	// 而不是一句无法定位的"连接被关闭"。
+	ErrProtocolMismatch = errors.New("节点协议版本过低（请升级 AgentDock 后重新配对）")
 )
+
+// checkProtocolVersion 校验节点声明的协议版本。
+//
+// 语义（DESIGN §3.1）：低于 config.MinProtocolVersion 拒连；
+// 高于 hub 已知版本按 hub 已知的最新版本处理——hub 只认自己这代协议，
+// 对方报更高版本说明节点更新，不应因此拒绝接入。
+func checkProtocolVersion(version string) error {
+	trimmed := strings.TrimSpace(version)
+	if trimmed == "" {
+		// 老节点不带版本字段：视为低于门槛，给出升级指引而不是含糊的"无效握手"。
+		return fmt.Errorf("%w：节点未声明协议版本", ErrProtocolMismatch)
+	}
+	current, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return fmt.Errorf("%w：无法识别的协议版本 %q", ErrProtocolMismatch, trimmed)
+	}
+	minimum, err := strconv.Atoi(config.MinProtocolVersion)
+	if err != nil {
+		// 常量非法属于编程错误，不能表现为对节点的拒连理由。
+		return fmt.Errorf("配置错误：MinProtocolVersion %q 非法: %w", config.MinProtocolVersion, err)
+	}
+	if current < minimum {
+		return fmt.Errorf("%w：节点协议版本 %d，hub 最低要求 %d", ErrProtocolMismatch, current, minimum)
+	}
+	return nil
+}
 
 type pendingResult struct {
 	result json.RawMessage
@@ -49,11 +81,35 @@ type Hub struct {
 	mu          sync.RWMutex
 	connections map[string]*nodeConnection
 	onHello     func(nodes.Node, protocol.Hello)
-	logger      interface{ Warn(string, ...any) }
+	logger      *slog.Logger
 }
 
 func NewHub(store *nodes.Store) *Hub {
-	return &Hub{store: store, connections: make(map[string]*nodeConnection)}
+	return NewHubWithLogger(store, slog.Default())
+}
+
+// NewHubWithLogger 允许注入日志器；DESIGN §7 要求连接/断开必须有结构化日志，
+// 生产装配走 serve.go 传入的实例化 logger。
+func NewHubWithLogger(store *nodes.Store, logger *slog.Logger) *Hub {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Hub{store: store, connections: make(map[string]*nodeConnection), logger: logger}
+}
+
+// rejectHandshake 在握手拒绝前尽力把原因写回节点再关闭连接。
+//
+// Upgrade 之后已无法写 HTTP 状态码，若直接关闭，AgentDock 只能看到一个凭空
+// 断开的连接，拿不到"请升级 AgentDock"这类可操作指引（DESIGN §3.1 要求拒连时
+// 给出升级指引）。这里复用协议已有的 MessageToolError 作为错误通道把原因递过去
+// （不新增协议消息类型，保证 AgentDock 端无需改动即可解析）；写失败也照常关闭。
+func rejectHandshake(connection *nodeConnection, reason string) {
+	_ = connection.write(protocol.Message{
+		Type:            protocol.MessageToolError,
+		ProtocolVersion: protocol.ConnectionProtocolVersion,
+		Error:           &protocol.RemoteError{Code: "PROTOCOL_VERSION_UNSUPPORTED", Message: reason, Retryable: false},
+	})
+	connection.close(errors.New(reason))
 }
 
 // SetHelloHandler 注册握手回调；回调在持有读锁快照后异步调用方语义由实现方保证。
@@ -116,12 +172,19 @@ func (h *Hub) Accept(w http.ResponseWriter, r *http.Request, nodeID, publicURL s
 		connection.close(err)
 		return fmt.Errorf("读取节点握手: %w", err)
 	}
-	// 协议版本门槛：两端 envelope 与 hello 内的版本都必须是当前支持的协议代。
-	if first.Type != protocol.MessageNodeHello || first.Hello == nil ||
-		first.ProtocolVersion != protocol.ConnectionProtocolVersion ||
-		first.Hello.ProtocolVersion != protocol.ConnectionProtocolVersion {
-		connection.close(errors.New("invalid handshake"))
-		return errors.New("节点握手协议版本无效（请升级 AgentDock 后重新配对）")
+	// 协议版本门槛（DESIGN §3.1）：低于 hub 最低要求 → 拒连并给升级指引；
+	// 高于 hub 知道的版本 → 按 hub 已知的最新版本处理，不拒连（向前兼容）。
+	if first.Type != protocol.MessageNodeHello || first.Hello == nil {
+		rejectHandshake(connection, "握手消息格式无效：首帧必须是 node.hello")
+		return ErrProtocolMismatch
+	}
+	if err := checkProtocolVersion(first.ProtocolVersion); err != nil {
+		rejectHandshake(connection, err.Error())
+		return err
+	}
+	if err := checkProtocolVersion(first.Hello.ProtocolVersion); err != nil {
+		rejectHandshake(connection, err.Error())
+		return err
 	}
 	updated, err := h.store.UpdateHello(r.Context(), nodeID, *first.Hello)
 	if err != nil {
@@ -154,6 +217,9 @@ func (h *Hub) Accept(w http.ResponseWriter, r *http.Request, nodeID, publicURL s
 	}
 	connection.markReady()
 	_ = socket.SetReadDeadline(time.Now().Add(2 * config.HeartbeatInterval))
+	h.logger.Info("节点已连接", "node", nodeID, "user", node.OwnerUserID,
+		"device", node.DeviceID, "version", updated.Version, "protocol", first.Hello.ProtocolVersion,
+		"replaced_previous", previous != nil)
 
 	// 新连接赢：踢掉同节点旧连接。
 	if previous != nil {
@@ -245,6 +311,7 @@ func (h *Hub) readLoop(connection *nodeConnection) {
 		}
 		h.mu.Unlock()
 		connection.close(ErrNodeDisconnected)
+		h.logger.Info("节点连接断开", "node", connection.nodeID)
 	}()
 	for {
 		var message protocol.Message

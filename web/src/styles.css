@@ -2,7 +2,14 @@
    AgentHub 设计系统 — 先锋暗色 / 实验排版 / 物理动效
    ============================================================ */
 
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;700&family=Noto+Sans+SC:wght@400;500;700;900&display=swap');
+/* 字体全部自托管（声明见 public/fonts/fonts.css，由 index.html 用 <link> 引入）。
+   内网/国产化交付环境不能依赖 fonts.googleapis.com：外链会触发外网
+   DNS 解析（阻塞渲染、泄露客户端 IP），静默失败后界面还会掉回系统字体。
+   字体文件随 vite 产物一起进 web_dist，最终由 go:embed 打进单二进制，
+   运行时零外网依赖。
+
+   这里不再 @import：那样 vite 会把 80 多条 @font-face 全部内联进主 CSS
+   （实测 10KB → 117KB，且无法被浏览器单独缓存）。 */
 
 :root {
   --bg: #0a0a0b;

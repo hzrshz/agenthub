@@ -594,7 +594,9 @@ func normalizeSemanticHashes(hashes []string) []string {
 	return normalized
 }
 
-func containsHash(hashes []string, target string) bool {
+// ContainsHash 判断契约哈希是否在已接受的兼容集合内。
+// 集合由 normalizeSemanticHashes 排序去重，因此可二分查找。
+func ContainsHash(hashes []string, target string) bool {
 	index := sort.SearchStrings(hashes, target)
 	return index < len(hashes) && hashes[index] == target
 }

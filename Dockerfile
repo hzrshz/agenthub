@@ -14,6 +14,17 @@ ARG BIN_NAME=bin/agenthub-linux-amd64
 #   - CA 证书（HTTPS 出站）——由 CI 从 build 阶段导出或本地准备
 #   - 时区数据
 # 本地构建时需要 bin/ca-certificates.crt + bin/zoneinfo.zip（make release-linux 产出）。
+# 数据目录（SQLite 单文件）以卷挂载持久化。
+# 容器内必须监听 0.0.0.0 才能被端口映射访问（默认 127.0.0.1 仅本机）。
+# scratch 无用户数据库，65534 是通用 nobody UID/GID。
+#
+# /data 必须在镜像内以 65534 属主预置：docker 自动创建的卷挂载点属主是
+# root:root 0755，非 root 进程首次启动写 SQLite 会 EACCES。空卷会继承镜像里
+# 该路径的属主与权限，所以这里用静态 busybox 阶段建好目录再 COPY 过来。
+# （scratch 没有 shell，无法在运行层 mkdir。）
+FROM busybox:1.36-uclibc AS datadir
+RUN mkdir -p /data && chown 65534:65534 /data && chmod 0700 /data
+
 FROM scratch
 # ARG 在 FROM 前声明后，必须在阶段内重新声明才能被 COPY 引用。
 ARG BIN_NAME
@@ -22,9 +33,7 @@ COPY certs/ca-certificates.crt /etc/ssl/certs/
 COPY certs/zoneinfo.zip /zoneinfo.zip
 ENV TZ=Asia/Shanghai \
     ZONEINFO=/zoneinfo.zip
-# 数据目录（SQLite 单文件）以卷挂载持久化。
-# 容器内必须监听 0.0.0.0 才能被端口映射访问（默认 127.0.0.1 仅本机）。
-# scratch 无用户数据库，65534 是通用 nobody UID/GID。
+COPY --from=datadir --chown=65534:65534 /data /data
 VOLUME ["/data"]
 ENV HUB_DATA_DIR=/data \
     HUB_LISTEN=0.0.0.0:8787

@@ -8,16 +8,17 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"fmt"
-	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	protocol "github.com/uvwt/agentdock-protocol"
+
 	"github.com/uvwt/agenthub/internal/audit"
 	"github.com/uvwt/agenthub/internal/auth"
 	"github.com/uvwt/agenthub/internal/bridge"
+	"github.com/uvwt/agenthub/internal/config"
 	"github.com/uvwt/agenthub/internal/core"
 	"github.com/uvwt/agenthub/internal/nodes"
 )
@@ -28,6 +29,15 @@ const (
 	csrfHeaderName = "X-AgentHub-CSRF"
 )
 
+// FleetReconciler 是节点/用户状态变更后触发 fleet 契约重算的最小接口。
+// 由 fleet.Bridge 实现；测试可注入 nil 跳过。
+type FleetReconciler interface {
+	// ReconcileNode 节点启停/删除后重算该节点涉及的工具。
+	ReconcileNode(nodeID string)
+	// ReconcileOwner 用户级变更（如禁用）后重算该用户的全部工具。
+	ReconcileOwner(ownerUserID string)
+}
+
 // Server 是 HTTP 层的依赖容器。
 type Server struct {
 	auth        *auth.Service
@@ -35,9 +45,22 @@ type Server struct {
 	hub         *bridge.Hub
 	gateway     MCPGateway
 	invokes     InvokeLister
+	fleet       FleetReconciler
 	pairLimiter *pairRateLimiter
 	public      string // PublicURL，用于给用户展示 MCP endpoint
-	mux         *http.ServeMux
+	// trustedProxies 决定是否采信 X-Forwarded-For；nil 或空 = 一律不采信。
+	trustedProxies *config.Resolver
+	mcpAuthLimiter *mcpAuthRateLimiter
+	log            *slog.Logger
+	mux            *http.ServeMux
+}
+
+// logger 返回 Server 的日志器，未注入时回退到 slog.Default（测试常用）。
+func (s *Server) logger() *slog.Logger {
+	if s.log != nil {
+		return s.log
+	}
+	return slog.Default()
 }
 
 // MCPGateway 是 /mcp 挂载所需的最小网关接口（避免 httpx 反向依赖 mcpgw）。
@@ -53,9 +76,34 @@ type InvokeLister interface {
 }
 
 func NewServer(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, gateway MCPGateway, invokes InvokeLister, publicURL string) *Server {
-	s := &Server{auth: authService, nodes: nodeStore, hub: hub, gateway: gateway, invokes: invokes, pairLimiter: newPairRateLimiter(), public: publicURL, mux: http.NewServeMux()}
+	return NewServerWithProxies(authService, nodeStore, hub, gateway, invokes, publicURL, nil)
+}
+
+// NewServerWithProxies 与 NewServer 相同，但显式指定可信反代网段解析器。
+// trustedProxies 决定是否采信 X-Forwarded-For（限流键的来源）。
+func NewServerWithProxies(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, gateway MCPGateway, invokes InvokeLister, publicURL string, trustedProxies *config.Resolver) *Server {
+	s := newServer(authService, nodeStore, hub, gateway, invokes, publicURL, trustedProxies)
 	s.routes()
 	return s
+}
+
+// NewServerWithFleet 是生产装配入口：额外注入 fleet 契约重算器。
+func NewServerWithFleet(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, gateway MCPGateway, invokes InvokeLister, publicURL string, trustedProxies *config.Resolver, fleetBridge FleetReconciler) *Server {
+	s := newServer(authService, nodeStore, hub, gateway, invokes, publicURL, trustedProxies)
+	s.fleet = fleetBridge
+	s.routes()
+	return s
+}
+
+func newServer(authService *auth.Service, nodeStore *nodes.Store, hub *bridge.Hub, gateway MCPGateway, invokes InvokeLister, publicURL string, trustedProxies *config.Resolver) *Server {
+	return &Server{auth: authService, nodes: nodeStore, hub: hub, gateway: gateway, invokes: invokes, pairLimiter: newPairRateLimiter(), public: publicURL, trustedProxies: trustedProxies, mcpAuthLimiter: newMCPAuthRateLimiter(), log: slog.Default(), mux: http.NewServeMux()}
+}
+
+// SetLogger 注入结构化日志器（DESIGN §7 要求认证失败与节点拒绝都有日志）。
+func (s *Server) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		s.log = logger
+	}
 }
 
 func (s *Server) Handler() http.Handler { return s.mux }
@@ -70,35 +118,37 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/auth/me", s.requireSession(s.handleMe))
 
 	// 管理员：用户管理
-	s.mux.HandleFunc("GET /v1/admin/users", s.requireAdmin(s.handleListUsers))
-	s.mux.HandleFunc("POST /v1/admin/users", s.requireAdmin(s.handleCreateUser))
-	s.mux.HandleFunc("POST /v1/admin/users/{id}/disable", s.requireAdmin(s.handleDisableUser))
-	s.mux.HandleFunc("POST /v1/admin/users/{id}/enable", s.requireAdmin(s.handleEnableUser))
-	s.mux.HandleFunc("POST /v1/admin/users/{id}/reset-password", s.requireAdmin(s.handleResetPassword))
-	s.mux.HandleFunc("GET /v1/admin/invokes", s.requireAdmin(s.handleAdminInvokes))
-	s.mux.HandleFunc("GET /v1/admin/stats", s.requireAdmin(s.handleAdminStats))
+	s.mux.HandleFunc("GET /v1/admin/users", s.requireAdmin(s.handleAdminOnlyReady(s.handleListUsers)))
+	s.mux.HandleFunc("POST /v1/admin/users", s.requireAdmin(s.handleAdminOnlyReady(s.handleCreateUser)))
+	s.mux.HandleFunc("POST /v1/admin/users/{id}/disable", s.requireAdmin(s.handleAdminOnlyReady(s.handleDisableUser)))
+	s.mux.HandleFunc("POST /v1/admin/users/{id}/enable", s.requireAdmin(s.handleAdminOnlyReady(s.handleEnableUser)))
+	s.mux.HandleFunc("POST /v1/admin/users/{id}/reset-password", s.requireAdmin(s.handleAdminOnlyReady(s.handleResetPassword)))
+	s.mux.HandleFunc("GET /v1/admin/invokes", s.requireAdmin(s.handleAdminOnlyReady(s.handleAdminInvokes)))
+	s.mux.HandleFunc("GET /v1/admin/stats", s.requireAdmin(s.handleAdminOnlyReady(s.handleAdminStats)))
 
 	// 用户：MCP Token
-	s.mux.HandleFunc("GET /v1/mcp-token", s.requireSession(s.handleGetMCPToken))
-	s.mux.HandleFunc("POST /v1/mcp-token/reset", s.requireSession(s.handleResetMCPToken))
+	s.mux.HandleFunc("GET /v1/mcp-token", s.requireSession(s.requireReadyForUser(s.handleGetMCPToken)))
+	s.mux.HandleFunc("POST /v1/mcp-token/reset", s.requireSession(s.requireReadyForUser(s.handleResetMCPToken)))
 
 	// 用户：调用记录
-	s.mux.HandleFunc("GET /v1/invokes", s.requireSession(s.handleListInvokes))
+	s.mux.HandleFunc("GET /v1/invokes", s.requireSession(s.requireReadyForUser(s.handleListInvokes)))
 
 	// 用户：节点管理
-	s.mux.HandleFunc("GET /v1/nodes", s.requireSession(s.handleListNodes))
-	s.mux.HandleFunc("POST /v1/nodes/pairing-codes", s.requireSession(s.handleCreatePairingCode))
-	s.mux.HandleFunc("POST /v1/nodes/{id}/disable", s.requireSession(s.handleDisableNode))
-	s.mux.HandleFunc("POST /v1/nodes/{id}/enable", s.requireSession(s.handleEnableNode))
-	s.mux.HandleFunc("DELETE /v1/nodes/{id}", s.requireSession(s.handleDeleteNode))
+	s.mux.HandleFunc("GET /v1/nodes", s.requireSession(s.requireReadyForUser(s.handleListNodes)))
+	s.mux.HandleFunc("POST /v1/nodes/pairing-codes", s.requireSession(s.requireReadyForUser(s.handleCreatePairingCode)))
+	s.mux.HandleFunc("POST /v1/nodes/{id}/disable", s.requireSession(s.requireReadyForUser(s.handleDisableNode)))
+	s.mux.HandleFunc("POST /v1/nodes/{id}/enable", s.requireSession(s.requireReadyForUser(s.handleEnableNode)))
+	s.mux.HandleFunc("DELETE /v1/nodes/{id}", s.requireSession(s.requireReadyForUser(s.handleDeleteNode)))
 
 	// 节点侧（AgentDock 出站，无会话，配对码/device token 认证）
-	s.mux.HandleFunc("POST "+protocol.PairPath, s.pairLimiter.middleware(s.handleNodePair))
+	s.mux.HandleFunc("POST "+protocol.PairPath, s.pairLimiter.middleware(s.clientIP, s.handleNodePair))
 	s.mux.HandleFunc("GET "+protocol.ConnectPath, s.handleNodeConnect)
 
 	// 平台侧 MCP（Bearer MCP Token 即身份，网关内部完成认证与限流）
 	if s.gateway != nil {
-		s.mux.Handle("/mcp", s.gateway.Handler())
+		// 外层包一层认证失败限流：网关内的每用户速率限制只在认证成功后生效，
+		// 无效 token 的 401 必须另有按 IP 的上限，否则可无成本爆破 token。
+		s.mux.Handle("/mcp", s.mcpAuthLimiter.middleware(s.clientIP, s.gateway.Handler().ServeHTTP))
 	}
 
 	// Web 界面（构建产物嵌入；API 路由优先）。
@@ -128,6 +178,8 @@ func (s *Server) requireSession(next func(http.ResponseWriter, *http.Request)) h
 	return func(w http.ResponseWriter, r *http.Request) {
 		session, err := s.auth.AuthenticateSession(r.Context(), s.sessionCookie(r))
 		if err != nil {
+			// 认证失败留痕：会话 cookie 被盗用/爆破在这里露头。
+			s.logger().Warn("会话认证失败", "path", r.URL.Path, "remote", r.RemoteAddr, "error", err)
 			writeAuthError(w, err)
 			return
 		}
@@ -135,6 +187,7 @@ func (s *Server) requireSession(next func(http.ResponseWriter, *http.Request)) h
 		// 双保险防跨站写。
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if !s.csrfValid(r, session.ID) {
+				s.logger().Warn("CSRF 校验失败", "path", r.URL.Path, "method", r.Method, "user", session.UserID)
 				writeError(w, http.StatusForbidden, "CSRF_REQUIRED", "csrf header is required")
 				return
 			}
@@ -172,18 +225,10 @@ func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request)) htt
 	})
 }
 
-func clientIP(r *http.Request) string {
-	// 反代终结 TLS 的部署形态：信任 X-Forwarded-For 的第一跳。
-	// hub 只在反代之后监听，不直接暴露公网。
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+// clientIP 返回限流与审计使用的客户端 IP，语义见 config.ClientIP：
+// 只有可信反代来源才采信 X-Forwarded-For，默认不采信，避免客户端伪造绕过限流。
+func (s *Server) clientIP(r *http.Request) string {
+	return config.ClientIP(r, s.trustedProxies)
 }
 
 // ---- 错误输出 ----
@@ -274,7 +319,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "invalid login body")
 		return
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	issued, err := s.auth.Login(r.Context(), req.Username, req.Password, ip)
 	if err != nil {
 		var rate *auth.RateLimitError
@@ -395,11 +440,31 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDisableUser(w http.ResponseWriter, r *http.Request) {
 	session, _ := sessionFromContext(r.Context())
-	if err := s.auth.DisableUser(r.Context(), session.UserID, r.PathValue("id")); err != nil {
+	targetUserID := r.PathValue("id")
+	if err := s.auth.DisableUser(r.Context(), session.UserID, targetUserID); err != nil {
 		writeAuthError(w, err)
 		return
 	}
+	// 禁用即时性（DESIGN §4.3）：users.status 只是让"下一次认证被拒"，
+	// 已建立的 WS 连接不会自己断开，必须显式踢线，否则被禁用用户的节点
+	// 仍然在线并继续被路由调用。配对码同时作废，禁用解除后旧码也不再生效。
+	nodeIDs, err := s.nodes.RevokeOwnerAccess(r.Context(), targetUserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "revoke user access failed")
+		return
+	}
+	for _, nodeID := range nodeIDs {
+		s.hub.Disconnect(nodeID)
+	}
+	s.reconcileOwner(targetUserID)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// reconcileOwner 在用户级变更后重算该用户命名空间的 fleet 契约（下架失效工具）。
+func (s *Server) reconcileOwner(ownerUserID string) {
+	if s.fleet != nil {
+		s.fleet.ReconcileOwner(ownerUserID)
+	}
 }
 
 func (s *Server) handleEnableUser(w http.ResponseWriter, r *http.Request) {

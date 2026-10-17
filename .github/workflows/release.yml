@@ -147,9 +147,11 @@ jobs:
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           DIGESTS=""
           for ARCH in amd64 arm64 loong64 riscv64; do
+            # per-arch 中间 tag 必须带版本，否则每次发版都覆盖同一个
+            # 无版本 tag（agenthub-amd64），多版本并存时调试会抓错镜像。
             PER_ARCH_TAGS=""
             for TAG in $TAGS; do
-              PER_ARCH_TAGS="$PER_ARCH_TAGS -t $IMAGE-$ARCH"
+              PER_ARCH_TAGS="$PER_ARCH_TAGS -t ${TAG}-${ARCH}"
             done
             # buildx 的进度日志（含 pushing manifest）走 stderr，$() 需 2>&1 合并。
             OUT=$(docker buildx build \
@@ -163,7 +165,7 @@ jobs:
             if [ -z "$DIGEST" ]; then
               echo "ERROR: could not capture manifest digest for $ARCH"; exit 1
             fi
-            DIGESTS="$DIGESTS $IMAGE-$ARCH@$DIGEST"
+            DIGESTS="$DIGESTS ${IMAGE}-${ARCH}@$DIGEST"
             echo "$ARCH digest: $DIGEST"
           done
           echo "DIGESTS=$DIGESTS" >> "$GITHUB_ENV"
@@ -174,8 +176,23 @@ jobs:
           for TAG in $TAGS; do
             docker buildx imagetools create -t "$TAG" ${{ env.DIGESTS }}
           done
-          # 按平台过滤验证（index 还含 per-arch provenance attestation，输出很长）。
-          docker buildx imagetools inspect "${IMAGE}:latest" | grep "Platform:"
+          # 断言而不是 grep：对刚创建的这批 tag 逐一验证 4 个架构都在 index 里。
+          # 之前只 `grep "Platform:"` 有输出就过——少推 2 个架构照样 exit 0；
+          # 手动触发时 TAGS 里没有 latest，inspect 的是上一次发布的镜像，
+          # 等于验证了不相干的东西。
+          FIRST_TAG=$(echo $TAGS | cut -d' ' -f1)
+          INSPECT=$(docker buildx imagetools inspect "$FIRST_TAG")
+          echo "$INSPECT"
+          MISSING=""
+          for ARCH in amd64 arm64 loong64 riscv64; do
+            if ! echo "$INSPECT" | grep -q "linux/$ARCH"; then
+              MISSING="$MISSING $ARCH"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "ERROR: manifest $FIRST_TAG missing platforms:$MISSING"; exit 1
+          fi
+          echo "manifest $FIRST_TAG contains all 4 platforms"
 
   release:
     needs: binaries

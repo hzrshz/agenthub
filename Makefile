@@ -1,18 +1,29 @@
-.PHONY: check ci web web-check build test release-linux
+.PHONY: check ci web web-check build test test-race release-linux
 
 # web: 构建前端产物到 internal/httpx/web_dist（产物提交入库；
 # CI 会校验产物与源码一致，改前端后必须执行 make web 再提交）
 web:
 	cd web && npm ci && npm run build
 
-# web-check: 校验已提交的嵌入产物是否与源码构建结果一致（防漂移）
+# web-check: 确认已提交的嵌入产物与"现在重新构建的结果"一致（防漂移）。
+#
+# 真正的漂移风险是：改了前端源码/依赖却没跑 make web 就提交，导致
+# web_dist 与源码不同步。因此判据是——重新构建之后，产物相对**暂存区
+# 或 HEAD**（取较新的那个，即"将要提交的状态"）有没有变化。
+# 这比看 git status 准：它忽略"这次改动还没提交"这种正常中间态，
+# 只在"重建结果 ≠ 提交内容"时判红。
 web-check: web
-	@if [ -n "$$(git status --porcelain internal/httpx/web_dist)" ]; then \
-		echo "ERROR: web_dist 与前端源码不一致，请提交重新构建后的产物"; \
+	@REF=HEAD; \
+	if ! git diff --quiet --cached; then REF=--cached; fi; \
+	if git diff --quiet $$REF -- internal/httpx/web_dist; then \
+		echo "web_dist is up to date"; \
+	else \
+		echo "ERROR: 重新构建后的 internal/httpx/web_dist 与已提交产物不一致。"; \
+		echo "前端源码/依赖已变更但产物没重新构建或没提交，请执行 make web 并提交产物："; \
 		git status --porcelain internal/httpx/web_dist; \
+		git diff --stat $$REF -- internal/httpx/web_dist | head -20; \
 		exit 1; \
 	fi
-	@echo "web_dist is up to date"
 
 build:
 	go build ./...
@@ -20,8 +31,15 @@ build:
 test:
 	go test ./... -count=1
 
-# check: 常规验证（go 测试 + 前端类型检查 + 产物漂移校验）
-check: test web-check
+# test-race: 并发热点（连接替换、inflight/rate map、fleet reconcileMu）的竞态检测。
+test-race:
+	go test ./... -race -count=1
+
+# check: 常规验证（go 测试 + race + vet + 前端类型检查 + 产物漂移校验）
+# vet 放在这里而不只放 ci：AGENTS.md 把 make check 定为"常规验证"，
+# 只在 ci 跑 vet 意味着开发者按常规流程会漏掉它。
+check: test test-race web-check
+	go vet ./...
 	cd web && npx tsc -b
 
 # ci: 完整交付验证
