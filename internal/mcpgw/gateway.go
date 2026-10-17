@@ -581,11 +581,20 @@ func gatewayToolResult(name string, result map[string]any, err error) (*mcp.Call
 	}
 	if err != nil {
 		result["tool"] = name
-		result["error"] = err.Error()
-		// 结构化错误字段：平台据此程序化分支，不解析 error 字符串。
-		// DESIGN §3.3 要求 NODE_OFFLINE 带 retryable=true，让 Agent 知道可重试。
+		// 错误文本分两类处理：
+		//
+		// 1. CodedError 是业务错误，Message 是我们自己写的、对调用方有意义的
+		//    提示（如"节点当前离线""请指定 node_id"），可以透出。
+		// 2. 其余是 fmt.Errorf 包装的内部错误（SQLite 表名/列名、文件路径、
+		//    节点返回的原始报文），一律替换为固定文案——否则 /mcp 这个
+		//    Bearer 认证的对外入口会把内部实现细节泄漏给任何持有 token 的调用方
+		//    （与 httpx 层的 safeMessage 是两套独立机制，此前只有 httpx 做了过滤）。
 		var coded *core.CodedError
 		if errors.As(err, &coded) {
+			result["error"] = coded.Message
+			// 结构化错误字段：平台据此程序化分支，不解析 error 字符串。
+			// DESIGN §3.3 要求 NODE_OFFLINE 带 retryable=true，让 Agent 知道可重试。
+
 			result["code"] = string(coded.Code)
 			result["retryable"] = coded.Retryable
 			var mismatch contractMismatchError
@@ -594,6 +603,8 @@ func gatewayToolResult(name string, result map[string]any, err error) (*mcp.Call
 				// 一旦加包装层类型断言会静默丢掉全部差异。
 				result["tool_contract_mismatch"] = mismatch
 			}
+		} else {
+			result["error"] = "internal error"
 		}
 	}
 	encoded, encodeErr := json.Marshal(map[string]any{

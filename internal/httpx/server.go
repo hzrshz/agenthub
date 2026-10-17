@@ -371,7 +371,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "logout failed")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	// 删除 cookie 的属性必须与设置时一致，否则部分浏览器不删。
+	// Secure / HttpOnly / SameSite / Path 全部对齐登录时的下发值——
+	// 此前漏了 Secure，与登录时不一致。
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookieName, Value: "", Path: "/",
+		MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+	})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

@@ -329,3 +329,82 @@ func TestLoginIPThrottleNotClearedByAnotherAccountsSuccess(t *testing.T) {
 		t.Fatalf("ip failures must decay on success: before=%d after=%d", before, after)
 	}
 }
+
+// 失败计数的时间窗口：超过窗口期未再失败则计数归零。
+//
+// 此前 last_failed_at 被写入却从未被读取，等价于计数永久累积——正常用户
+// 很久之后登录仍被历史失败拖进长封锁，攻击者也能低频尝试让计数只涨不落。
+func TestLoginFailureCountResetsAfterWindow(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.InitializeAdmin(ctx, "root@example.com", strongPassword); err != nil {
+		t.Fatalf("initialize admin: %v", err)
+	}
+	accountKey := core.HashToken(strings.ToLower("root@example.com"))
+	ipKey := core.HashToken("203.0.113.20")
+
+	failuresNow := func() int {
+		t.Helper()
+		var n int
+		err := svc.db.QueryRowContext(ctx, `SELECT failures FROM login_throttles
+			WHERE key_type='account' AND key_value = ?`, accountKey).Scan(&n)
+		if errors.Is(err, sql.ErrNoRows) {
+			return -1
+		}
+		if err != nil {
+			t.Fatalf("read failures: %v", err)
+		}
+		return n
+	}
+
+	// 可控时钟：让 blocked_until 过期，否则后续失败会被直接拦成 429。
+	clock := time.Now()
+	svc.now = func() time.Time { return clock }
+
+	// 窗口期内连续 5 次失败，把计数推到 5（阶梯 1 分钟）。
+	// 每次只前进 1 秒，始终落在窗口内。
+	for i := 0; i < 5; i++ {
+		svc.recordLoginFailure(ctx, accountKey, ipKey)
+		clock = clock.Add(time.Second)
+	}
+	if got := failuresNow(); got != 5 {
+		t.Fatalf("failures = %d, want 5", got)
+	}
+
+	// 静默超过窗口期（不产生新的失败记录），计数应在下次失败时归零。
+	clock = clock.Add(LoginFailureWindow + time.Minute)
+
+	// 再失败一次：窗口已过，计数应从 0 重新算起（=1），而不是累加到 6。
+	svc.recordLoginFailure(ctx, accountKey, ipKey)
+	if got := failuresNow(); got != 1 {
+		t.Fatalf("after the window expires the counter must restart, got %d (want 1)", got)
+	}
+}
+
+// 窗口期内计数继续累加（不能每次都归零，否则爆破防护失效）。
+func TestLoginFailureCountAccumulatesWithinWindow(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	if _, err := svc.InitializeAdmin(ctx, "root@example.com", strongPassword); err != nil {
+		t.Fatalf("initialize admin: %v", err)
+	}
+	accountKey := core.HashToken(strings.ToLower("root@example.com"))
+	ipKey := core.HashToken("203.0.113.21")
+
+	clock := time.Now()
+	svc.now = func() time.Time { return clock }
+
+	for i := 0; i < 4; i++ {
+		svc.recordLoginFailure(ctx, accountKey, ipKey)
+		// 只前进 1 秒，始终落在窗口内。
+		clock = clock.Add(time.Second)
+	}
+	var got int
+	if err := svc.db.QueryRowContext(ctx, `SELECT failures FROM login_throttles
+		WHERE key_type='account' AND key_value = ?`, accountKey).Scan(&got); err != nil {
+		t.Fatalf("read failures: %v", err)
+	}
+	if got != 4 {
+		t.Fatalf("failures within the window must accumulate, got %d (want 4)", got)
+	}
+}

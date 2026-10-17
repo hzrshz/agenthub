@@ -82,7 +82,25 @@ func serve(ctx context.Context, cfg config.Config) error {
 		}
 	}()
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: handler}
+	// 超时配置（Slowloris 防护）：裸 http.Server 没有任何超时，
+	// 攻击者可以用慢速请求占住连接不放，直到耗尽文件描述符或 goroutine。
+	//
+	// WebSocket 必须豁免 WriteTimeout——节点连接是长生命周期的，
+	// 套上写超时会在 120 秒后静默掐断所有节点连接。
+	// Go 的正确做法是只设 ReadHeaderTimeout（限制建连与请求头阶段），
+	// 由连接自己的读/写 deadline 管长连接（bridge 里已对 socket 设了
+	// 读超时与心跳超时）。
+	srv := &http.Server{
+		Addr:    cfg.Listen,
+		Handler: handler,
+		// 限制读取请求头的时长：Slowloris 的核心手法就是慢速发请求头。
+		ReadHeaderTimeout: 15 * time.Second,
+		// 不设 ReadTimeout：它同样会打断长生命周期的 WebSocket 读。
+		// 节点连接的读超时由 bridge 自己的 socket deadline 控制。
+		// 不设 WriteTimeout：同理，会掐断 WebSocket 与长时间的 MCP 调用。
+		// 慢响应体由请求上下文的超时与调用链自身控制。
+		IdleTimeout: 120 * time.Second, // keep-alive 空闲连接回收
+	}
 	logger.Info("agenthub listening", "version", version, "listen", cfg.Listen, "public_url", cfg.PublicURL)
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()

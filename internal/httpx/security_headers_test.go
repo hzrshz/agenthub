@@ -218,3 +218,56 @@ func TestAuditActorAndSourceIPAreConsistent(t *testing.T) {
 		t.Errorf("source_ip = %q, want %q", sourceIP, "192.0.2.55")
 	}
 }
+
+// 会话 cookie 的下发与删除必须属性一致。
+//
+// 删除 cookie 时属性与设置时不匹配，部分浏览器不会删除它——表现为
+// "点了退出，但刷新又登回来了"。此前 logout 漏了 Secure。
+func TestSessionCookieAttributesConsistent(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+	if _, err := e.svc.InitializeAdmin(ctx, "root@example.com", strongPassword); err != nil {
+		t.Fatalf("init admin: %v", err)
+	}
+
+	loginResp, _ := e.do(t, "POST", "/v1/auth/login", "", "", map[string]string{
+		"username": "root@example.com", "password": strongPassword,
+	})
+	var loginCookie *http.Cookie
+	for _, c := range loginResp.Cookies() {
+		if c.Name == sessionCookieName {
+			loginCookie = c
+		}
+	}
+	if loginCookie == nil {
+		t.Fatal("login must set a session cookie")
+	}
+	if !loginCookie.HttpOnly || !loginCookie.Secure {
+		t.Fatalf("login cookie must be HttpOnly+Secure, got HttpOnly=%v Secure=%v", loginCookie.HttpOnly, loginCookie.Secure)
+	}
+
+	token, csrf := e.loginAs(t, "root@example.com", strongPassword)
+	logoutResp, _ := e.do(t, "POST", "/v1/auth/logout", token, csrf, nil)
+	var logoutCookie *http.Cookie
+	for _, c := range logoutResp.Cookies() {
+		if c.Name == sessionCookieName {
+			logoutCookie = c
+		}
+	}
+	if logoutCookie == nil {
+		t.Fatal("logout must clear the session cookie")
+	}
+	// 删除指令的属性必须与设置时一致。
+	if logoutCookie.HttpOnly != loginCookie.HttpOnly {
+		t.Errorf("logout HttpOnly=%v, login HttpOnly=%v", logoutCookie.HttpOnly, loginCookie.HttpOnly)
+	}
+	if logoutCookie.Secure != loginCookie.Secure {
+		t.Errorf("logout Secure=%v, login Secure=%v (mismatched deletion may be ignored by the browser)", logoutCookie.Secure, loginCookie.Secure)
+	}
+	if logoutCookie.Path != loginCookie.Path {
+		t.Errorf("logout Path=%q, login Path=%q", logoutCookie.Path, loginCookie.Path)
+	}
+	if logoutCookie.MaxAge >= 0 {
+		t.Errorf("logout cookie must expire immediately, MaxAge=%d", logoutCookie.MaxAge)
+	}
+}

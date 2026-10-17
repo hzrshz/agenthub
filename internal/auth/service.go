@@ -669,18 +669,33 @@ func (s *Service) throttleRemaining(ctx context.Context, accountKey, ipKey strin
 // recordLoginFailure 累加账号+IP 失败计数并按阶梯延长封锁，返回最长封锁时长。
 func (s *Service) recordLoginFailure(ctx context.Context, accountKey, ipKey string) time.Duration {
 	var longest time.Duration
+	now := s.now().UTC()
 	for _, key := range [][2]string{{"account", accountKey}, {"ip", ipKey}} {
 		var failures int
-		err := s.db.QueryRowContext(ctx, `SELECT failures FROM login_throttles WHERE key_type = ? AND key_value = ?`, key[0], key[1]).Scan(&failures)
+		var lastFailed sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT failures, last_failed_at FROM login_throttles
+			WHERE key_type = ? AND key_value = ?`, key[0], key[1]).Scan(&failures, &lastFailed)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			continue
+		}
+		// 失败计数加时间窗口：上一次失败若已超过窗口期，计数归零重来。
+		//
+		// 此前 last_failed_at 被写入却从未被读取，等价于"计数永久累积"——
+		// 三年前的一次失败和一秒前的失败对阶梯延迟的影响完全相同。两个后果：
+		// 正常用户很久之后尝试登录仍被历史失败累积拖进长封锁；攻击者也能靠
+		// 低频尝试让计数只涨不落，长期占住账号。
+		if lastFailed.Valid {
+			if parsed, parseErr := time.Parse(time.RFC3339Nano, lastFailed.String); parseErr == nil {
+				if now.Sub(parsed) > LoginFailureWindow {
+					failures = 0
+				}
+			}
 		}
 		failures++
 		delay := loginDelay(failures)
 		if delay > longest {
 			longest = delay
 		}
-		now := s.now().UTC()
 		_, err = s.db.ExecContext(ctx, `INSERT INTO login_throttles(key_type, key_value, failures, blocked_until, last_failed_at)
 			VALUES(?, ?, ?, ?, ?)
 			ON CONFLICT(key_type, key_value) DO UPDATE SET failures = excluded.failures,
@@ -692,6 +707,11 @@ func (s *Service) recordLoginFailure(ctx context.Context, accountKey, ipKey stri
 	}
 	return longest
 }
+
+// LoginFailureWindow 失败计数的有效窗口：超过此时长未再失败，计数归零。
+//
+// 取值大于最长封锁（15 分钟），确保"仍在封锁期内"不会被判为窗口过期。
+var LoginFailureWindow = 30 * time.Minute
 
 // loginDelay 失败次数递增的封锁时长，LoginThrottleMaxFailures 次后稳定 15 分钟。
 func loginDelay(failures int) time.Duration {

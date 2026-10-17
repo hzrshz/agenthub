@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -579,4 +580,49 @@ func TestMCPNodeOfflineIsRetryable(t *testing.T) {
 	if !strings.Contains(encoded, `"retryable":true`) {
 		t.Fatalf("MCP response must carry retryable=true: %s", encoded)
 	}
+}
+
+// 错误信息分级：业务错误透出 Message，内部错误一律替换为固定文案。
+//
+// /mcp 是 Bearer 认证的对外入口，内部错误里可能含 SQLite 表名/列名、
+// 文件路径、节点返回的原始报文——泄漏给任何持有 token 的调用方都属于
+// 信息泄露（CWE-209）。此前 httpx 层有 safeMessage 过滤，mcpgw 这条
+// 路径完全没有。
+func TestInternalErrorsDoNotLeakDetails(t *testing.T) {
+	t.Run("internal error is masked", func(t *testing.T) {
+		// 模拟一条内部错误：含表名、列名等实现细节。
+		internal := fmt.Errorf("写入调用记录: no such column: device_token_hash in table nodes (path=/var/lib/agenthub/control.db)")
+		result, err := gatewayToolResult("echo", nil, internal)
+		if err != nil {
+			t.Fatalf("wrap: %v", err)
+		}
+		encoded := string(mustJSON(t, result))
+		for _, leak := range []string{"no such column", "device_token_hash", "table nodes", "/var/lib/agenthub/control.db"} {
+			if strings.Contains(encoded, leak) {
+				t.Errorf("internal error detail %q leaked to the MCP client: %s", leak, encoded)
+			}
+		}
+		if !strings.Contains(encoded, "internal error") {
+			t.Errorf("expected a generic internal error message: %s", encoded)
+		}
+	})
+
+	t.Run("business error keeps its message", func(t *testing.T) {
+		// 业务错误是我们自己写的、对调用方有意义的提示，必须透出。
+		business := core.NewRetryableError(core.CodeNodeOffline, "节点当前离线", nil)
+		result, err := gatewayToolResult("echo", nil, business)
+		if err != nil {
+			t.Fatalf("wrap: %v", err)
+		}
+		encoded := string(mustJSON(t, result))
+		if !strings.Contains(encoded, "节点当前离线") {
+			t.Errorf("business error message must reach the caller: %s", encoded)
+		}
+		if !strings.Contains(encoded, "NODE_OFFLINE") {
+			t.Errorf("business error code must reach the caller: %s", encoded)
+		}
+		if !strings.Contains(encoded, `"retryable":true`) {
+			t.Errorf("retryable flag must reach the caller: %s", encoded)
+		}
+	})
 }
