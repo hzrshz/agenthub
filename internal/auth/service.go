@@ -125,7 +125,7 @@ func verifyArgon2(secret, encoded string) bool {
 	if err != nil || len(want) < 16 || len(want) > 64 {
 		return false
 	}
-	got := argon2.IDKey([]byte(secret), salt, iterations, memCost, parallelism, uint32(len(want)))
+	got := argon2.IDKey([]byte(secret), salt, iterations, memCost, parallelism, uint32(len(want))) // #nosec G115 -- 上文已校验 len(want) ∈ [16, 64]，转 uint32 不会溢出。
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
@@ -314,7 +314,10 @@ func (s *Service) Login(ctx context.Context, username, password, ip string) (Iss
 		// actor 归属：登录失败是"某账号"的事件，actor 必须是那个账号而不是 admin。
 		// 此前硬编码 actor_type="admin"/actor_id="system"，让审计里所有登录失败
 		// 都被记成管理员行为，按 action 追溯来源时得到错误结论。
-		s.recordAudit(ctx, "user", accountKey[:16], "auth.login", accountKey[:16], "failed", nil)
+		// actor_id 用账号键哈希（与限流键一族防止审计里存明文键），但 metadata
+		// 附带明文用户名——管理员要能直接看出哪个账号在被爆破；用户名不是秘密。
+		s.recordAudit(ctx, "user", accountKey[:16], "auth.login", accountKey[:16], "failed",
+			map[string]any{"username": username})
 		if retry >= time.Minute {
 			return IssuedSession{}, &RateLimitError{RetryAfter: retry}
 		}
@@ -331,7 +334,8 @@ func (s *Service) Login(ctx context.Context, username, password, ip string) (Iss
 	if err != nil {
 		return IssuedSession{}, err
 	}
-	s.recordAudit(ctx, "user", userID, "auth.login", issued.Session.ID, "succeeded", nil)
+	s.recordAudit(ctx, "user", userID, "auth.login", issued.Session.ID, "succeeded",
+		map[string]any{"username": storedUsername})
 	return issued, nil
 }
 

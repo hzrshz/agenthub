@@ -48,6 +48,26 @@ func TestMigrationV2AddsSourceIPToExistingAuditTable(t *testing.T) {
 		VALUES ('evt_old', '2026-01-01T00:00:00Z', 'user', 'usr_a', 'auth.login', 'account', 'x', 'succeeded')`); err != nil {
 		t.Fatalf("seed v1 row: %v", err)
 	}
+	// v1 库还有 invoke_logs（无 client_ip 列）：v3 迁移要对它 ALTER，
+	// 夹具必须包含该表，否则迁移在"表不存在"上失败。
+	if _, err := db.ExecContext(ctx, `CREATE TABLE invoke_logs (
+		id TEXT PRIMARY KEY,
+		occurred_at TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		node_id TEXT NOT NULL,
+		tool_name TEXT NOT NULL,
+		outcome TEXT NOT NULL CHECK (outcome IN ('success', 'error', 'timeout', 'cancelled')),
+		duration_ms INTEGER NOT NULL,
+		error_code TEXT NOT NULL DEFAULT '',
+		request_id TEXT NOT NULL DEFAULT ''
+	)`); err != nil {
+		t.Fatalf("create v1 invoke_logs table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO invoke_logs
+		(id, occurred_at, user_id, node_id, tool_name, outcome, duration_ms, error_code)
+		VALUES ('inv_old', '2026-01-01T00:00:00Z', 'usr_a', 'node_1', 'echo', 'success', 10, '')`); err != nil {
+		t.Fatalf("seed v1 invoke row: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, `PRAGMA user_version = 1`); err != nil {
 		t.Fatalf("set version: %v", err)
 	}
@@ -86,6 +106,20 @@ func TestMigrationV2AddsSourceIPToExistingAuditTable(t *testing.T) {
 	}
 	if total != 2 {
 		t.Fatalf("migration must preserve existing rows, got %d rows", total)
+	}
+
+	// v3 迁移：invoke_logs 补 client_ip 列，历史行补默认空串、新行可写 IP。
+	var legacyIP string
+	if err := db.QueryRowContext(ctx, `SELECT client_ip FROM invoke_logs WHERE id = 'inv_old'`).Scan(&legacyIP); err != nil {
+		t.Fatalf("read migrated invoke row: %v", err)
+	}
+	if legacyIP != "" {
+		t.Errorf("migrated legacy invoke row client_ip = %q, want empty", legacyIP)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO invoke_logs
+		(id, occurred_at, user_id, node_id, tool_name, outcome, duration_ms, error_code, client_ip)
+		VALUES ('inv_new', '2026-01-02T00:00:00Z', 'usr_a', 'node_1', 'echo', 'success', 10, '', '198.51.100.2')`); err != nil {
+		t.Fatalf("insert with client_ip after migration: %v", err)
 	}
 }
 

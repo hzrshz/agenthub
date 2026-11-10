@@ -26,6 +26,8 @@ type InvokeLog struct {
 	Outcome    string `json:"outcome"` // success | error | timeout | cancelled
 	DurationMS int64  `json:"duration_ms"`
 	ErrorCode  string `json:"error_code,omitempty"`
+	// ClientIP 调用来源 IP（/mcp 是 Bearer 入口，跟踪调用来自哪个地址）。
+	ClientIP string `json:"client_ip,omitempty"`
 }
 
 // InvokeQuery 是一次查询的全部条件。
@@ -66,7 +68,7 @@ func NewStore(db *sql.DB) *Store {
 }
 
 // RecordInvoke 写入一条调用记录。失败只返回错误给调用方自行决策（记录失败不阻断调用本身）。
-func (s *Store) RecordInvoke(ctx context.Context, userID, nodeID, toolName, outcome string, duration time.Duration, errorCode string) error {
+func (s *Store) RecordInvoke(ctx context.Context, userID, nodeID, toolName, outcome string, duration time.Duration, errorCode, clientIP string) error {
 	if outcome != OutcomeSuccess && outcome != OutcomeError && outcome != OutcomeTimeout && outcome != OutcomeCancelled {
 		return core.NewError(core.CodeValidation, "invalid invoke outcome", nil)
 	}
@@ -75,10 +77,10 @@ func (s *Store) RecordInvoke(ctx context.Context, userID, nodeID, toolName, outc
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO invoke_logs(
-		id, occurred_at, user_id, node_id, tool_name, outcome, duration_ms, error_code
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, occurred_at, user_id, node_id, tool_name, outcome, duration_ms, error_code, client_ip
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, s.now().UTC().Format(time.RFC3339Nano), userID, nodeID, toolName, outcome,
-		duration.Milliseconds(), strings.TrimSpace(errorCode))
+		duration.Milliseconds(), strings.TrimSpace(errorCode), clientIP)
 	if err != nil {
 		return fmt.Errorf("写入调用记录: %w", err)
 	}
@@ -141,7 +143,7 @@ func (s *Store) query(ctx context.Context, query InvokeQuery, joinUsers bool) (I
 		return InvokePage{}, fmt.Errorf("统计调用记录: %w", err)
 	}
 
-	selectCols := `l.id, l.occurred_at, l.user_id, l.node_id, l.tool_name, l.outcome, l.duration_ms, l.error_code`
+	selectCols := `l.id, l.occurred_at, l.user_id, l.node_id, l.tool_name, l.outcome, l.duration_ms, l.error_code, l.client_ip`
 	if joinUsers {
 		selectCols += `, u.username`
 	}
@@ -158,9 +160,9 @@ func (s *Store) query(ctx context.Context, query InvokeQuery, joinUsers bool) (I
 		var log InvokeLog
 		var username sql.NullString
 		var occurred string
-		targets := []any{&log.ID, &occurred, &log.UserID, &log.NodeID, &log.ToolName, &log.Outcome, &log.DurationMS, &log.ErrorCode, &username}
+		targets := []any{&log.ID, &occurred, &log.UserID, &log.NodeID, &log.ToolName, &log.Outcome, &log.DurationMS, &log.ErrorCode, &log.ClientIP, &username}
 		if !joinUsers {
-			targets = targets[:8]
+			targets = targets[:9]
 		}
 		if err := rows.Scan(targets...); err != nil {
 			return InvokePage{}, fmt.Errorf("扫描调用记录: %w", err)

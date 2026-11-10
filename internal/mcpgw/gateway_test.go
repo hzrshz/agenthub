@@ -25,7 +25,7 @@ import (
 )
 
 type capturedInvoke struct {
-	userID, nodeID, toolName, outcome string
+	userID, nodeID, toolName, outcome, clientIP string
 }
 
 type captureRecorder struct {
@@ -33,10 +33,10 @@ type captureRecorder struct {
 	records []capturedInvoke
 }
 
-func (c *captureRecorder) RecordInvoke(_ context.Context, userID, nodeID, toolName, outcome string, _ time.Duration, _ string) error {
+func (c *captureRecorder) RecordInvoke(_ context.Context, userID, nodeID, toolName, outcome string, _ time.Duration, _, clientIP string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.records = append(c.records, capturedInvoke{userID, nodeID, toolName, outcome})
+	c.records = append(c.records, capturedInvoke{userID, nodeID, toolName, outcome, clientIP})
 	return nil
 }
 
@@ -87,7 +87,9 @@ func newGatewayEnv(t *testing.T) *gwEnv {
 		}
 		_ = hub.Accept(w, r, node.ID, "https://hub.example.com")
 	})
-	ts := httptest.NewServer(mux)
+	// 生产装配里 httpx 的 auditIPInjector 会给每个请求挂来源 IP；这里用同一
+	// 注入点模拟，否则 /mcp 的调用记录 IP 断言在测试里拿不到值。
+	ts := httptest.NewServer(withAuditIP(mux))
 
 	// 造两个用户的 MCP token。
 	tokenAlice, err := authSvc.IssueMCPToken(ctx, "usr_alice")
@@ -495,7 +497,14 @@ func waitForPublish(t *testing.T, env *gwEnv, owner, tool string) {
 	t.Fatalf("fleet contract %s/%s not published within 5s", owner, tool)
 }
 
-// 调用记录：成功的 echo 调用必须留一条元数据记录（不含参数）。
+// withAuditIP 模拟生产 httpx.auditIPInjector：给请求上下文挂固定来源 IP。
+func withAuditIP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(core.WithAuditIP(r.Context(), "203.0.113.7")))
+	})
+}
+
+// 调用记录：成功的 echo 调用必须留一条元数据记录（不含参数），且带来源 IP。
 func TestInvokeRecorded(t *testing.T) {
 	env := newGatewayEnv(t)
 	nodeConn := env.connectToolNode(t, "usr_alice", "device-alice-01", false)
@@ -523,6 +532,10 @@ func TestInvokeRecorded(t *testing.T) {
 			env.invokes.mu.Unlock()
 			if record.userID != "usr_alice" || record.toolName != "echo" || record.outcome != OutcomeSuccess {
 				t.Fatalf("unexpected record: %+v", record)
+			}
+			// 等保审计要求调用可追溯来源：MCP 调用记录必须带请求来源 IP。
+			if record.clientIP != "203.0.113.7" {
+				t.Fatalf("invoke record must carry source ip, got %q", record.clientIP)
 			}
 			return
 		}

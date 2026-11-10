@@ -11,7 +11,7 @@ import (
 )
 
 // CurrentSchemaVersion 是当前程序对应的控制库 Schema 版本。
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 type schemaMigration struct {
 	version    int
@@ -172,6 +172,7 @@ END`,
     outcome TEXT NOT NULL CHECK (outcome IN ('success', 'error', 'timeout', 'cancelled')),
     duration_ms INTEGER NOT NULL,
     error_code TEXT NOT NULL DEFAULT '',
+    client_ip TEXT NOT NULL DEFAULT '',
     request_id TEXT NOT NULL DEFAULT ''
 )`,
 	`CREATE INDEX IF NOT EXISTS idx_invoke_logs_user_time
@@ -179,7 +180,7 @@ END`,
 	`CREATE INDEX IF NOT EXISTS idx_invoke_logs_time ON invoke_logs(occurred_at)`,
 }
 
-// v1 即初始版本；v2 为审计表补充来源 IP。
+// v1 即初始版本；v2 为审计表补充来源 IP；v3 为调用记录补充来源 IP。
 var schemaMigrations = []schemaMigration{
 	{
 		version: 2,
@@ -191,10 +192,20 @@ var schemaMigrations = []schemaMigration{
 			//
 			// 新库不需要这条：currentSchema 里已包含该列。这里只处理已存在的库。
 			// 走 ALTER TABLE 而不是改 currentSchema，是因为已有库不会重建。
-			`ALTER TABLE audit_events ADD COLUMN source_ip TEXT NOT NULL DEFAULT ''`,
+`ALTER TABLE audit_events ADD COLUMN source_ip TEXT NOT NULL DEFAULT ''`,
 			// 按来源 IP 检索审计记录（安全事件溯源时按 IP 过滤）。
 			`CREATE INDEX IF NOT EXISTS idx_audit_events_source_ip
-    ON audit_events(source_ip, occurred_at DESC)`,
+	    ON audit_events(source_ip, occurred_at DESC)`,
+		},
+	},
+	{
+		version: 3,
+		name:    "invoke_logs_client_ip",
+		statements: []string{
+			// 等保二级审计要求调用记录可追溯到来源地址。/mcp 是 Bearer 入口，
+			// 此前 invoke_logs 只有 user/node/tool，无法回答"这个调用来自哪个 IP"。
+			// 新库不需要这条：currentSchema 里已包含该列。这里只处理已存在的库。
+			`ALTER TABLE invoke_logs ADD COLUMN client_ip TEXT NOT NULL DEFAULT ''`,
 		},
 	},
 }

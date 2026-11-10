@@ -22,13 +22,13 @@ func TestInvokeQueryBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	if err := e.invokes.RecordInvoke(ctx, alice.ID, "node_1", "echo", audit.OutcomeSuccess, 120*time.Millisecond, ""); err != nil {
+	if err := e.invokes.RecordInvoke(ctx, alice.ID, "node_1", "echo", audit.OutcomeSuccess, 120*time.Millisecond, "", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if err := e.invokes.RecordInvoke(ctx, alice.ID, "node_1", "browser_open", audit.OutcomeError, 30*time.Millisecond, "VALIDATION_ERROR"); err != nil {
+	if err := e.invokes.RecordInvoke(ctx, alice.ID, "node_1", "browser_open", audit.OutcomeError, 30*time.Millisecond, "VALIDATION_ERROR", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if err := e.invokes.RecordInvoke(ctx, "usr_someone_else", "node_2", "exec", audit.OutcomeError, 30*time.Millisecond, "NODE_OFFLINE"); err != nil {
+	if err := e.invokes.RecordInvoke(ctx, "usr_someone_else", "node_2", "exec", audit.OutcomeError, 30*time.Millisecond, "NODE_OFFLINE", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 

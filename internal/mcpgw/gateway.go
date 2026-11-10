@@ -57,7 +57,7 @@ type rateWindow struct {
 
 // InvokeRecorder 是调用记录写入的最小接口（audit.Store 实现；测试可注入空实现）。
 type InvokeRecorder interface {
-	RecordInvoke(ctx context.Context, userID, nodeID, toolName, outcome string, duration time.Duration, errorCode string) error
+	RecordInvoke(ctx context.Context, userID, nodeID, toolName, outcome string, duration time.Duration, errorCode, clientIP string) error
 }
 
 // Outcome 常量与 audit 包对齐。
@@ -106,6 +106,10 @@ func (g *Gateway) Handler() http.Handler {
 			return
 		}
 		reqCtx := mcpContextWithUser(r.Context(), user.ID)
+		// 来源 IP 随调用记录落库（等保审计可追溯来源）：生产装配中 httpx 的
+		// auditIPInjector 已按可信反代语义把 IP 放进请求上下文；这里显式再挂一次，
+		// 保证 /mcp 即使绕过该中间件（如直接挂载）也有同一来源。
+		reqCtx = core.WithAuditIP(reqCtx, core.AuditSourceIP(r.Context()))
 		reqCtx = WithTraceparent(reqCtx, r.Header.Get("traceparent"))
 		g.handlerWithServer(server).ServeHTTP(w, r.WithContext(reqCtx))
 	})
@@ -396,7 +400,8 @@ func (g *Gateway) recordInvoke(ctx context.Context, userID, nodeID, toolName str
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
 	// 记录失败不阻断调用结果，只打日志。
-	if recordErr := g.invokes.RecordInvoke(recordCtx, userID, nodeID, toolName, outcome, duration, errorCode); recordErr != nil && g.logger != nil {
+	// client_ip 从调用上下文取（Handler 已挂入）；空串表示该调用没有网络来源。
+	if recordErr := g.invokes.RecordInvoke(recordCtx, userID, nodeID, toolName, outcome, duration, errorCode, core.AuditSourceIP(ctx)); recordErr != nil && g.logger != nil {
 		g.logger.Warn("写入调用记录失败", "user", userID, "node", nodeID, "tool", toolName, "error", recordErr)
 	}
 }

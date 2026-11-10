@@ -30,12 +30,28 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 // 会让后续按 outcome 过滤的查询静默漏数据。
 func TestRecordInvokeRejectsInvalidOutcome(t *testing.T) {
 	store, _ := newTestStore(t)
-	err := store.RecordInvoke(context.Background(), "usr_a", "node_a", "echo", "weird", time.Second, "")
+	err := store.RecordInvoke(context.Background(), "usr_a", "node_a", "echo", "weird", time.Second, "", "")
 	if err == nil {
 		t.Fatal("invalid outcome must be rejected")
 	}
 	if core.ErrorCodeOf(err) != core.CodeValidation {
 		t.Fatalf("expected VALIDATION_ERROR, got %v", err)
+	}
+}
+
+// 来源 IP 必须随调用记录落库并可查询：等保审计要求调用可追溯来源地址。
+func TestRecordInvokeStoresClientIP(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := store.RecordInvoke(ctx, "usr_a", "node_1", "echo", OutcomeSuccess, time.Second, "", "203.0.113.9"); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	page, err := store.ListByUser(ctx, InvokeQuery{UserID: "usr_a", Limit: 50, Page: 1})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ClientIP != "203.0.113.9" {
+		t.Fatalf("client ip must round-trip, got %+v", page.Items)
 	}
 }
 
@@ -53,11 +69,11 @@ func TestListByUserIsolatesTenants(t *testing.T) {
 		}
 	}
 	for i := 0; i < 3; i++ {
-		if err := store.RecordInvoke(ctx, "usr_alice", "node_1", "echo", OutcomeSuccess, time.Second, ""); err != nil {
+		if err := store.RecordInvoke(ctx, "usr_alice", "node_1", "echo", OutcomeSuccess, time.Second, "", ""); err != nil {
 			t.Fatalf("record: %v", err)
 		}
 	}
-	if err := store.RecordInvoke(ctx, "usr_bob", "node_2", "browser_open", OutcomeError, time.Second, "NODE_OFFLINE"); err != nil {
+	if err := store.RecordInvoke(ctx, "usr_bob", "node_2", "browser_open", OutcomeError, time.Second, "NODE_OFFLINE", ""); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
