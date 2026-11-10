@@ -37,6 +37,7 @@ const (
 )
 
 // PasswordPolicyDesc 是一句话规则描述，用于接口返回给前端展示。
+// #nosec G101 -- 这是口令策略的文案说明，不是凭据。
 const PasswordPolicyDesc = "至少 12 个字符，且至少包含大写字母、小写字母、数字、特殊符号中的三类；不得使用常见弱口令、连续字符或重复字符"
 
 // charClasses 统计口令覆盖了哪几类字符。

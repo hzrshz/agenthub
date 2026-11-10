@@ -19,7 +19,27 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # 等保红线 7 发布门禁：tag 发布前 SAST + 依赖漏洞扫描必须为零。
+  # 单独成 job 而不是塞进 binaries 矩阵：7 个架构腿各自跑一遍扫描纯属浪费，
+  # 且矩阵腿失败难以定位是"平台特有"还是"代码问题"。
+  security-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.10"
+          cache: true
+
+      - name: Dependency vulnerability scan (govulncheck)
+        run: make vuln
+
+      - name: Static security analysis (gosec)
+        run: make gosec
+
   binaries:
+    needs: security-gate
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -52,7 +72,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           cache: true
 
       # Web 界面 go:embed 进二进制，必须在 go build 之前构建产物。

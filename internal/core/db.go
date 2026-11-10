@@ -36,8 +36,10 @@ func OpenSQLite(ctx context.Context, path string, maxOpenConns int) (*sql.DB, er
 		// 目录权限也收紧。MkdirAll 只对**新建**目录应用 mode，对已存在的目录
 		// 保持原权限——而数据目录可能是运维预先建好的（默认 0755），
 		// 此时同机其他用户仍可列出目录内容、读到 control.db。
-		// chmod 对新建与已存在都生效，因此这里补一次。
-		if err := os.Chmod(dataDir, 0o700); err != nil {
+// chmod 对新建与已存在都生效，因此这里补一次。
+			// #nosec G302 -- 目录必须保留属主可执行位（否则无法进入），
+			// 0700 是目录而非文件的权限收紧形态，等保基线要求即此值。
+			if err := os.Chmod(dataDir, 0o700); err != nil {
 			slog.Warn("收紧数据目录权限失败，请检查属主与挂载选项",
 				"dir", dataDir, "error", err)
 		}

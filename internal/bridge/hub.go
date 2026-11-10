@@ -229,6 +229,10 @@ func (h *Hub) Accept(w http.ResponseWriter, r *http.Request, nodeID, publicURL s
 		onHello(updated, *first.Hello)
 	}
 
+	// readLoop 的生命周期跟随节点连接而非 HTTP 请求：WebSocket 长连接必须
+	// 在 handler 返回后继续存活，绝不能绑定到请求级 ctx（G118 的"请求
+	// ctx 可用"在这里正是需要回避的反模式，见心跳超时的独立处理）。
+	// #nosec G118 -- 连接级 goroutine 故意脱离请求生命周期。
 	go h.readLoop(connection)
 	return nil
 }
@@ -327,9 +331,13 @@ func (h *Hub) readLoop(connection *nodeConnection) {
 				message.Error = &protocol.RemoteError{Code: "NODE_BAD_RESPONSE", Message: "节点返回了空错误"}
 			}
 			connection.resolve(message.RequestID, pendingResult{err: message.Error})
-		case protocol.MessageNodeHeartbeat:
-			_ = h.store.Touch(context.Background(), connection.nodeID)
-			_ = connection.write(protocol.Message{Type: protocol.MessageNodeHeartbeat})
+case protocol.MessageNodeHeartbeat:
+		// 心跳落库用独立超时而非请求 ctx：连接生命周期独立于任何 HTTP 请求，
+		// 但库写也不能无限阻塞读循环——慢写不应拖垮心跳与后续帧处理。
+		touchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = h.store.Touch(touchCtx, connection.nodeID)
+		cancel()
+		_ = connection.write(protocol.Message{Type: protocol.MessageNodeHeartbeat})
 		}
 	}
 }

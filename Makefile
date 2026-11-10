@@ -1,4 +1,4 @@
-.PHONY: check ci web web-check build test test-race release-linux
+.PHONY: check ci web web-check build test test-race release-linux vuln gosec
 
 # web: 构建前端产物到 internal/httpx/web_dist（产物提交入库；
 # CI 会校验产物与源码一致，改前端后必须执行 make web 再提交）
@@ -35,15 +35,26 @@ test:
 test-race:
 	go test ./... -race -count=1
 
-# check: 常规验证（go 测试 + race + vet + 前端类型检查 + 产物漂移校验）
+# vuln: Go 依赖漏洞扫描（govulncheck）。等保红线 7"发布前门禁"的一部分：
+# 依赖与标准库 CVE 必须清零后才可发版。版本固定保证本机与 CI 结果可复现；
+# 用 go run 而不是 go install，避免依赖 PATH 里有 $GOPATH/bin。
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+# gosec: Go 静态安全分析（SAST）。等保红线 7"发布前门禁"的一部分，
+# 只在 ci（完整交付）执行；常规 check 不含，避免每轮开发都跑完整 SAST。
+gosec:
+	go run github.com/securego/gosec/v2/cmd/gosec@v2.30.0 -quiet ./...
+
+# check: 常规验证（go 测试 + race + vet + 前端类型检查 + 产物漂移校验 + 依赖漏洞扫描）
 # vet 放在这里而不只放 ci：AGENTS.md 把 make check 定为"常规验证"，
 # 只在 ci 跑 vet 意味着开发者按常规流程会漏掉它。
-check: test test-race web-check
+check: test test-race web-check vuln
 	go vet ./...
 	cd web && npx tsc -b
 
-# ci: 完整交付验证
-ci: web check
+# ci: 完整交付验证（含 SAST 静态安全分析）
+ci: web check gosec
 	go vet ./...
 
 # release-linux: 本地静态交叉编译全部国产化目标
