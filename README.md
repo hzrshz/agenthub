@@ -36,7 +36,7 @@ HUB_DATA_DIR=/var/lib/agenthub HUB_PUBLIC_URL=https://hub.example.com \
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `HUB_PUBLIC_URL` | 是 | hub 对外访问的 origin（无路径）。**生产必须 `https://`；测试允许 `http://localhost` 或 `http://<局域网IP>`**，公网 http 域名会被拒绝 |
+| `HUB_PUBLIC_URL` | 是 | hub 对外访问的地址。反代子路径部署时可带**一段** base path（如 `https://hub.example.com/app`）。**生产必须 `https://`；测试允许 `http://localhost` 或 `http://<局域网IP>`**，公网 http 域名会被拒绝 |
 | `HUB_DATA_DIR` | 否 | 数据目录（SQLite 单文件），默认 `~/.agenthub`（容器内 `/data`） |
 | `HUB_LISTEN` | 否 | 监听地址，默认 `127.0.0.1:8787`（容器内 `0.0.0.0:8787`） |
 | `HUB_TRUSTED_PROXY_CIDRS` | 否 | 可信反代网段（逗号分隔的 CIDR），**用了反向代理就应设置**。只有请求来自这些网段时 hub 才采信 `X-Forwarded-For` / `X-Forwarded-Proto`，用于按 IP 限流与 HSTS 判定；未设置则一律不采信（客户端可伪造这些头绕过限流）。宿主机反代填 `127.0.0.1/32,::1/128`，compose 网段按实际网段填 |
@@ -169,6 +169,60 @@ HUB_LISTEN=127.0.0.1:8787 \
 HUB_PUBLIC_URL=https://hub.example.com \
   ./agenthub serve
 ```
+
+### 子路径部署（一个端口挂多个系统）
+
+一个公网端口需要同时挂多个系统时，可用 nginx 把每个子路径**剥前缀**转给对应后端。前端与后端**不需要任何编译期差异**：同一份产物在根路径和子路径下都能工作，部署形态差异全部留在反代层。
+
+- 前端资源：构建用相对路径（`./assets/...`），index.html 从哪个前缀加载就在哪个前缀下解析；
+- API/WebSocket：前端在运行时从自身加载地址推导 API 前缀（请求 `<前缀>/v1/...`、`<前缀>/mcp`），nginx 剥掉前缀后 hub 收到的仍是 `/v1/...`、`/mcp`；
+- MCP endpoint：`HUB_PUBLIC_URL` 允许带 base path 后，界面展示的 endpoint 自动是 `https://hub.example.com/app/mcp`。
+
+```nginx
+# hub 部署在 /app；同一 server 里可再挂其他系统的 location
+location = /app { return 301 /app/; }       # 必须：无斜杠时相对资源会解析到父级
+location /app/ {
+    proxy_pass http://127.0.0.1:8787/;       # 尾斜杠 = 剥掉 /app 前缀（漏了会 404）
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;  # /v1/nodes/connect 的 WS 升级
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 3600s;                # WS 长连接
+}
+```
+
+```bash
+HUB_PUBLIC_URL=https://hub.example.com/app \
+HUB_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128 \
+./agenthub serve
+```
+
+注意三点：
+
+1. **节点侧限制**：AgentDock 配对 endpoint 校验要求不带路径的 origin（见上文"关键限制"），节点**不能**直接填 `https://hub.example.com/app` 配对；它的配对/连接请求固定落在裸 origin 下的 `/v1/nodes/pair` 与 `/v1/nodes/connect`。**hub 在子路径、根路径归其他系统（如 octop）时，不要用宽泛的 `location /v1/`**——会把主系统自己的 `/v1/...` API 一起劫持到 hub。用两条精确匹配，只认 dock 的两个协议路径，对主系统的占用为零；配对成功后的握手与全部调用都走已建立的 WS，不再产生新的 HTTP 路径：
+   ```nginx
+   # AgentDock 专用：只认两个协议路径（配对 + WS 连接），不影响 octop 的其他 /v1/...。
+   # proxy_pass 不带 URI 表示原样透传；写尾斜杠会把 /v1 也剥掉，hub 收 404。
+   location = /v1/nodes/pair {
+       proxy_pass http://127.0.0.1:8787;
+       proxy_http_version 1.1;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
+   location = /v1/nodes/connect {
+       proxy_pass http://127.0.0.1:8787;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;   # WS 升级
+       proxy_set_header Connection "upgrade";
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       proxy_set_header X-Forwarded-Proto $scheme;
+       proxy_read_timeout 3600s;                 # WS 长连接
+   }
+   ```
+   配对时 AgentDock 的 endpoint 填 `https://hub.example.com`（不带 `/app`、不带 `/mcp`）即可。若根路径系统完全不占 `/v1/` 前缀，也可以退化成一条 `location /v1/`（同样 proxy_pass 不带 URI），否则一律用上面的精确匹配。
+2. `HUB_PUBLIC_URL` 的 base path 限制为**单段**（如 `/app`），不接受 `a/b` 多级、`..` 或 `//`；
+3. WebSocket 的 Upgrade 头必须转发，否则节点连接握手即断。
 
 ### 备份
 

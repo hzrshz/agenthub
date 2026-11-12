@@ -64,8 +64,9 @@ type Config struct {
 	DataDir string
 	// Listen HTTP 监听地址（hub 本体只听 HTTP，TLS 由反代终结）。
 	Listen string
-	// PublicURL hub 的公网 HTTPS origin（无路径）。节点据此推导回调地址，
-	// 是唯一必填配置。
+	// PublicURL hub 的公网地址。反代子路径部署（一个端口挂多个系统）时
+	// 允许带一段 base path，如 https://hub.example.com/app。节点据此推导
+	// 回调地址，是唯一必填配置。
 	PublicURL string
 	// TrustedProxyCIDRs 允许提供 X-Forwarded-For 的反代来源网段。
 	// 安全边界：clientIP 只在这些网段的来源才采信 XFF，否则一律用 RemoteAddr。
@@ -186,13 +187,22 @@ func RemoteIP(r *http.Request) string {
 // http://localhost 或 http://<局域网IP>——与 AgentDock 节点侧
 // normalizeEndpoint 的规则对齐（节点侧本就允许 http+IP/loopback 配对），
 // 否则"先用 IP 测试、再迁 HTTPS"的路径走不通。
+//
+// 反代子路径部署（一个端口挂多个系统，nginx 把 /app/ 剥前缀转给 hub）时
+// 允许带**一段** base path：前端/API/WS/MCP 都在同一前缀下，MCP endpoint
+// 即 public + "/mcp"。限制单段且无 ".."，避免回调地址拼接产生歧义路径。
 func ValidatePublicURL(publicURL string) error {
 	if publicURL == "" {
-		return errors.New("HUB_PUBLIC_URL is required (e.g. https://hub.example.com or http://192.168.1.10:8787 for LAN testing)")
+		return errors.New("HUB_PUBLIC_URL is required (e.g. https://hub.example.com or https://hub.example.com/app, or http://192.168.1.10:8787 for LAN testing)")
 	}
 	parsed, err := url.Parse(publicURL)
-	if err != nil || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("HUB_PUBLIC_URL must be a bare origin (scheme://host[:port], no path/query)")
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("HUB_PUBLIC_URL must be scheme://host[:port][/base-path], without credentials/query/fragment")
+	}
+	if path := strings.Trim(parsed.Path, "/"); path != "" {
+		if strings.Contains(path, "/") || path == "." || path == ".." || strings.Contains(parsed.Path, "//") {
+			return errors.New("HUB_PUBLIC_URL base path must be a single clean segment (e.g. /app), no nested path, '..' or '//'")
+		}
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "https":

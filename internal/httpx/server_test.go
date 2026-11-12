@@ -247,3 +247,87 @@ func TestChangePasswordInvalidatesSessions(t *testing.T) {
 		t.Fatalf("old session must be revoked after password change, got %d", resp.StatusCode)
 	}
 }
+
+// 子路径部署：public URL 带 base path 时，MCP endpoint 必须带同一前缀。
+// config.ValidatePublicURL 已放开单段 path（反代把 /app/ 剥前缀转给 hub），
+// 这里锁住 endpoint 拼接（s.public + "/mcp"）不因部署形态变化而回归。
+func TestMCPEndpointCarriesBasePath(t *testing.T) {
+	ctx := context.Background()
+	db, err := core.OpenSQLite(ctx, filepath.Join(t.TempDir(), "test.db"), 2)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := core.EnsureSchema(ctx, db); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	svc := auth.NewService(db)
+	if _, err := svc.InitializeAdmin(ctx, "root@example.com", strongPassword); err != nil {
+		t.Fatalf("init admin: %v", err)
+	}
+	// 与生产装配一致，仅 PublicURL 带 /app 前缀。
+	server := NewServer(svc, nodes.NewStore(db), bridge.NewHub(nodes.NewStore(db)), nil, audit.NewStore(db), "https://hub.example.com/app")
+	ts := httptest.NewServer(server.Handler())
+	t.Cleanup(ts.Close)
+
+	do := func(method, path, token, csrf string, body any) (*http.Response, map[string]any) {
+		t.Helper()
+		var reader *bytes.Reader
+		if body != nil {
+			raw, _ := json.Marshal(body)
+			reader = bytes.NewReader(raw)
+		} else {
+			reader = bytes.NewReader(nil)
+		}
+		req, _ := http.NewRequest(method, ts.URL+path, reader)
+		if token != "" {
+			req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		}
+		if csrf != "" {
+			req.Header.Set(csrfHeaderName, csrf)
+		}
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("do %s %s: %v", method, path, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var result map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&result)
+		return resp, result
+	}
+
+	resp, body := do("POST", "/v1/auth/login", "", "", map[string]string{"username": "root@example.com", "password": strongPassword})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login: status %d body %v", resp.StatusCode, body)
+	}
+	var sessionToken string
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == sessionCookieName {
+			sessionToken = cookie.Value
+		}
+	}
+	csrf, _ := body["csrf_token"].(string)
+	// 首登强制改密：必须先改密，业务接口才放行（requireReadyForUser）。
+	resp, body = do("POST", "/v1/auth/password", sessionToken, csrf, map[string]string{
+		"current_password": strongPassword, "new_password": "Brand7newKp2zX",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("change password: status %d body %v", resp.StatusCode, body)
+	}
+	resp, body = do("POST", "/v1/auth/login", "", "", map[string]string{"username": "root@example.com", "password": "Brand7newKp2zX"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("re-login after password change: status %d body %v", resp.StatusCode, body)
+	}
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == sessionCookieName {
+			sessionToken = cookie.Value
+		}
+	}
+	resp, body = do("GET", "/v1/mcp-token", sessionToken, "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("mcp-token: status %d body %v", resp.StatusCode, body)
+	}
+	if endpoint, _ := body["mcp_endpoint"].(string); endpoint != "https://hub.example.com/app/mcp" {
+		t.Fatalf("mcp_endpoint must carry base path, got %q", endpoint)
+	}
+}

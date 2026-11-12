@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ArrowRight, Terminal } from "lucide-react";
-import { api, setCSRF } from "../api";
+import { api, setCSRF, ApiError } from "../api";
 
 export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [username, setUsername] = useState("");
@@ -49,20 +49,13 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
     setBusy(true);
     setError("");
     try {
-      const response = await fetch("/v1/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        setError(data.message ?? "登录失败");
-        return;
-      }
+      // 登录也走统一 api 封装：API_BASE 前缀（子路径部署）与错误处理
+      // 只有一份，避免再出现绕过封装的裸 fetch("/v1/...")。
+      const data = await api.post<{ csrf_token: string }>("/v1/auth/login", { username, password });
       setCSRF(data.csrf_token);
       onLoggedIn();
-    } catch {
-      setError("网络错误");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "网络错误");
     } finally {
       setBusy(false);
     }
