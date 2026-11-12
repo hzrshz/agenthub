@@ -29,7 +29,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.10"
+          go-version: "1.26.11"
           cache: true
 
       - name: Dependency vulnerability scan (govulncheck)
@@ -72,7 +72,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.10"
+          go-version: "1.26.11"
           cache: true
 
       # Web 界面 go:embed 进二进制，必须在 go build 之前构建产物。
