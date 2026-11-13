@@ -87,7 +87,7 @@
 | 1.1a 口令唯一/复杂度/定期更换 | 复杂度极强（≥12 位、3 类、弱口令/连续/重复/含用户名全拦）；首登与管理员重置强制改密 | auth/password_policy.go、service.go:136-170 |
 | 1.1b 登录失败处理 | 账号+IP 双维度阶梯封锁（最终 15 分钟）、登录超时自动退出（会话绝对过期）、限流键防 XFF 伪造 | auth/service.go:289-335、config.go:163-173 |
 | 1.1c 鉴别信息防窃听 | Cookie HttpOnly/Secure/SameSite=Lax；HSTS 仅在可信 HTTPS 下发；PublicURL 公网域名强制 https | httpx/server.go:347-356、security_headers.go |
-| 1.1d 组合鉴别+密码技术 | Web 会话 = 口令验签 + 服务端签名令牌；MCP/Device token 用密码学哈希承载 | auth/service.go、nodes/store.go |
+| 1.1（双因素为三级 d 项，现有形态提前具备） | Web 会话 = 口令验签 + 服务端签名令牌；MCP/Device token 用密码学哈希承载 | auth/service.go、nodes/store.go |
 | 1.2a/b/c/d 访问控制 | RBAC（admin/user）+ 数据级归属校验；跨租户一律 NotFound（不泄露存在性）；默认拒绝；无默认口令；账号可停用且即时生效 | nodes/store.go:353-361、httpx/server.go:230-239、nodes_http.go |
 | 1.3a/b/c 安全审计 | 登录成败/改密/管理操作/节点操作全覆盖；字段含时间/用户/动作/对象/结果/来源 IP；append-only；不落 arguments/result | auth/service.go:795-807、nodes/store.go:85-104、core/schema.go |
 | 1.4a/d/e 最小安装/数据有效性/漏洞修补 | scratch 镜像+非 root；输入统一 decodeJSON 1MB 上限+参数化 SQL+PairInput 字段校验+schema 注入防御+panic 防护；go1.26.10（2026-11 修复 GO-2026-6809）依赖与标准库漏洞已清零（govulncheck 门禁） | Dockerfile、httpx/server.go:297-304、mcpgw/gateway.go:187-275 |
