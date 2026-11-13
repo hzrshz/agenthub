@@ -315,9 +315,23 @@ func TestMCPListAndInvoke(t *testing.T) {
 	}
 }
 
-// 错误 token 拒绝且 401 带 WWW-Authenticate。
-func TestMCPAuthRejected(t *testing.T) {
+// stateless 网关不得宣告 tools.listChanged：现代协议客户端会据此在连接时
+// 自动发起 subscriptions/listen 长连接，而 stateless 传输无法应答该订阅，
+// 客户端 connect 会挂起到超时（Cherry Studio 2.2.0 实测 180s）。
+func TestMCPDoesNotAdvertiseToolListChanged(t *testing.T) {
 	env := newGatewayEnv(t)
+	session := connectSession(t, env.ts.URL+"/mcp", env.userToken)
+	init := session.InitializeResult()
+	if init == nil || init.Capabilities == nil || init.Capabilities.Tools == nil {
+		t.Fatalf("tools capability must be advertised: %+v", init)
+	}
+	if init.Capabilities.Tools.ListChanged {
+		t.Fatal("stateless gateway must not advertise tools.listChanged (triggers subscriptions/listen)")
+	}
+}
+
+// 错误 token 拒绝且 401 带 WWW-Authenticate。
+func TestMCPAuthRejected(t *testing.T) {	env := newGatewayEnv(t)
 	resp, err := http.Post(env.ts.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
 	if err != nil {
 		t.Fatalf("post mcp: %v", err)

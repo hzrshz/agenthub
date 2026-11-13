@@ -81,6 +81,16 @@ func (g *Gateway) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, err := g.auth.AuthenticateMCPToken(r.Context(), bearerToken(r.Header.Get("Authorization")))
 		if err != nil {
+			// 认证失败留痕：MCP 是机器对机器入口，客户端"一直连接中/超时"时
+			// 首先要区分"请求没到 hub"与"token 失效"，没有这行日志只能靠猜。
+			// 与 /v1 会话认证失败、节点连接认证失败同一处理立场；不记录 token 本身。
+			remote := core.AuditSourceIP(r.Context())
+			if remote == "" {
+				remote = r.RemoteAddr
+			}
+			if g.logger != nil {
+				g.logger.Warn("MCP 认证失败", "remote", remote, "error", err)
+			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="agenthub", resource_metadata="/.well-known/mcp"`)
 			writeMCPError(w, http.StatusUnauthorized, string(core.ErrorCodeOf(err)), "mcp token invalid")
 			return
@@ -100,7 +110,19 @@ func (g *Gateway) Handler() http.Handler {
 		}
 		// 每请求临时 server：按用户动态注册工具面（Stateless 模式下 handler
 		// 只在本次请求内使用该 server，注册成本低且天然用户隔离）。
-		server := mcp.NewServer(&mcp.Implementation{Name: "agenthub", Version: "1"}, &mcp.ServerOptions{})
+		//
+		// 必须显式关闭 tools.listChanged：网关的 stateless 传输从不下发
+		// tools/list_changed 通知，若宣告 listChanged=true，现代协议客户端
+		// （2026-07-28 era，如 Cherry Studio 2.2.0）会在连接建立时自动发起
+		// subscriptions/listen 长连接订阅；stateless handler 无法应答该订阅，
+		// 客户端 connect 会一直挂起到超时（实测 180s）。默认值来自 SDK 的
+		// 能力推断，所以这里必须覆盖而非省略。
+		server := mcp.NewServer(&mcp.Implementation{Name: "agenthub", Version: "1"}, &mcp.ServerOptions{
+			Capabilities: &mcp.ServerCapabilities{
+				Logging: &mcp.LoggingCapabilities{},
+				Tools:   &mcp.ToolCapabilities{},
+			},
+		})
 		if err := g.registerUserTools(r.Context(), user.ID, server); err != nil {
 			writeMCPError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "assemble tool surface failed")
 			return

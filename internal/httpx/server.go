@@ -111,7 +111,7 @@ func (s *Server) SetLogger(logger *slog.Logger) {
 // 来源 IP 也在这里注入上下文：后续所有审计记录（登录、改密、管理操作）
 // 都能自动带上来源 IP，无需逐个业务函数传参。
 func (s *Server) Handler() http.Handler {
-	return securityHeaders(s.trustedProxies, auditIPInjector(s.clientIP, s.mux))
+	return securityHeaders(s.trustedProxies, auditIPInjector(s.clientIP, accessLog(s.logger(), s.clientIP, s.mux)))
 }
 
 // auditIPInjector 把请求来源 IP 放进上下文供审计使用。
