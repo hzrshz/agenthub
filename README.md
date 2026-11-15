@@ -172,11 +172,13 @@ HUB_PUBLIC_URL=https://hub.example.com \
 
 ### 子路径部署（一个端口挂多个系统）
 
-一个公网端口需要同时挂多个系统时，可用 nginx 把每个子路径**剥前缀**转给对应后端。前端与后端**不需要任何编译期差异**：同一份产物在根路径和子路径下都能工作，部署形态差异全部留在反代层。
+一个公网端口需要同时挂多个系统时，用 nginx 或 Caddy 把每个子路径**剥前缀**转给对应后端。前端与后端**不需要任何编译期差异**：同一份产物在根路径和子路径下都能工作，部署形态差异全部留在反代层。
 
 - 前端资源：构建用相对路径（`./assets/...`），index.html 从哪个前缀加载就在哪个前缀下解析；
-- API/WebSocket：前端在运行时从自身加载地址推导 API 前缀（请求 `<前缀>/v1/...`、`<前缀>/mcp`），nginx 剥掉前缀后 hub 收到的仍是 `/v1/...`、`/mcp`；
+- API/WebSocket：前端在运行时从自身加载地址推导 API 前缀（请求 `<前缀>/v1/...`、`<前缀>/mcp`），反代剥掉前缀后 hub 收到的仍是 `/v1/...`、`/mcp`；
 - MCP endpoint：`HUB_PUBLIC_URL` 允许带 base path 后，界面展示的 endpoint 自动是 `https://hub.example.com/app/mcp`。
+
+#### nginx
 
 ```nginx
 # hub 部署在 /app；同一 server 里可再挂其他系统的 location
@@ -191,6 +193,47 @@ location /app/ {
     proxy_read_timeout 3600s;                # WS 长连接
 }
 ```
+
+#### Caddy
+
+`handle_path` 自动剥前缀（没有 nginx 的尾斜杠陷阱），WebSocket 升级与 SSE flush 自动处理，域名站点证书自动申请续期（纯 IP 站点需 `tls internal` 自签）：
+
+```caddyfile
+hub.example.com {
+    # 可选：HSTS 作用于整个站点（含根路径系统），按双方安全要求决定
+    header Strict-Transport-Security "max-age=31536000"
+
+    # /app 无斜杠必须 301：相对资源 ./assets/... 依赖带斜杠的文档 URL
+    redir /app /app/ 301
+
+    # AgentHub：Web + API + MCP（handle_path 自动剥掉 /app 前缀）
+    handle_path /app/* {
+        reverse_proxy 127.0.0.1:8787
+    }
+
+    # AgentHub：AgentDock 节点侧（裸 origin 下仅这两个协议路径，原样透传）
+    handle /v1/nodes/pair {
+        reverse_proxy 127.0.0.1:8787
+    }
+    handle /v1/nodes/connect {
+        reverse_proxy 127.0.0.1:8787
+    }
+
+    # 可选：hub 健康检查（根路径系统没占 /healthz 时不冲突）
+    handle /healthz {
+        reverse_proxy 127.0.0.1:8787
+    }
+
+    # 根路径系统（如 octop）兜底，必须放最后
+    handle {
+        reverse_proxy 127.0.0.1:8088
+    }
+}
+```
+
+Caddy 按 path 匹配的具体程度排序，精确匹配先于兜底 `handle` 命中。容器部署时 `reverse_proxy` 目标换成服务名（如 `agenthub:8787`），`HUB_TRUSTED_PROXY_CIDRS` 对应改成 compose 网段。
+
+两种反代下 hub 的启动配置相同：
 
 ```bash
 HUB_PUBLIC_URL=https://hub.example.com/app \
@@ -220,9 +263,9 @@ HUB_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128 \
        proxy_read_timeout 3600s;                 # WS 长连接
    }
    ```
-   配对时 AgentDock 的 endpoint 填 `https://hub.example.com`（不带 `/app`、不带 `/mcp`）即可。若根路径系统完全不占 `/v1/` 前缀，也可以退化成一条 `location /v1/`（同样 proxy_pass 不带 URI），否则一律用上面的精确匹配。
+   配对时 AgentDock 的 endpoint 填 `https://hub.example.com`（不带 `/app`、不带 `/mcp`）即可。若根路径系统完全不占 `/v1/` 前缀，也可以退化成一条 `location /v1/`（同样 proxy_pass 不带 URI），否则一律用上面的精确匹配。Caddy 等价写法是 `handle /v1/nodes/pair`、`handle /v1/nodes/connect`（已在上方 Caddy 配置中），同理不要用宽泛的 `handle /v1/*`。
 2. `HUB_PUBLIC_URL` 的 base path 限制为**单段**（如 `/app`），不接受 `a/b` 多级、`..` 或 `//`；
-3. WebSocket 的 Upgrade 头必须转发，否则节点连接握手即断。
+3. WebSocket 升级头：nginx 必须转发 `Upgrade`/`Connection`，否则节点连接握手即断；Caddy 自动处理，无需配置。
 
 ### 备份
 
