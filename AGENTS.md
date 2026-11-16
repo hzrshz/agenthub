@@ -14,6 +14,25 @@ AgentHub 是多用户 AgentDock 汇聚网关：用户的 AgentDock 通过 Device
 - 非显然业务约束、兼容原因和安全边界使用中文注释说明"为什么"。
 - 测试描述真实业务行为，优先覆盖状态变化、错误路径、安全边界（跨租户隔离、禁用即时性、token 失效）和曾经出现过的问题。
 
+## 改动影响面联动（防"只改主体、漏侧翼"）
+
+任何功能改动都要**同时审查并一并交付受影响面**，不能只改主体代码就提交——
+"漏掉 Dockerfile/文档/示例"属于缺陷，不是遗漏。提交前对照下表逐项自查
+（新增功能、新配置项尤其适用），明细与历史教训见
+[docs/DEVELOPMENT-CHECKLIST.md](docs/DEVELOPMENT-CHECKLIST.md)：
+
+| 改动主体 | 必须同步检查/修改的关联位置 |
+|---|---|
+| 新增/修改环境变量或配置 | `internal/config/config.go`（解析+校验+测试）、`.env.example`、README 环境变量表、docs/DESIGN.md §7、容器部署示例（docker run/compose，如容器可见）、`scripts/run.sh` 白名单（如需要注入） |
+| 数据库 / SQL / schema | `internal/core/schema.go` 三端 DDL（currentSchema/currentSchemaMySQL/currentSchemaPostgres）、迁移、三端真库测试（SQLite/MySQL/PG）、CI 真库 job、备份策略文档（LEVEL2 §1.8） |
+| HTTP / API / 路由 / 协议 | web 前端（改后必须 `make web` 并提交 `web_dist`）、README/等保文档、反代文档（Caddy/nginx 示例） |
+| 部署形态（端口/路径/卷/镜像/启动方式/脚本） | Dockerfile、Makefile build/release 目标、README Docker 节与 compose 示例、`scripts/run.sh` |
+| 安全 / 认证 / 秘密 / 配额 | 等保文档（LEVEL2-REVIEW-REMEDIATION.md）、审计与限流测试、秘密存储与权限相关注释 |
+| 依赖 / 工具链 | go.mod/go.sum、Makefile 版本固定、CI 矩阵、README 版本要求、govulncheck/gosec 门禁 |
+
+**提交前自查动作**：`git diff --stat` 扫一遍改动文件对照上表；再全局 grep 被改的
+旧表述（变量名、路径、"SQLite 单文件"、"distroless" 之类）确认无残留引用。
+
 ## 认证与秘密
 
 - 三类秘密（Web session / 每用户 MCP Token / 每节点 Device Token）与配对码、口令全部只存哈希（SHA-256 或 argon2id），任何接口不得回显秘密明文；Token 明文只在签发响应中出现一次。
