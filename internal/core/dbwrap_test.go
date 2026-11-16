@@ -1,7 +1,9 @@
 package core
 
 import (
+	"context"
 	"database/sql"
+	"path/filepath"
 	"testing"
 )
 
@@ -35,12 +37,19 @@ func TestRebindPlaceholders(t *testing.T) {
 
 // DialectOf 必须从驱动实例推断出正确方言。mysql/pg 用惰性 sql.Open 即可
 // 拿到注册的驱动实例（不真正连服务器）。
+//
+// 注意：这里显式用 OpenSQLite 而非 openTestDB——在 CI 的真库 job 里
+// openTestDB 会被 HUB_TEST_DB_DRIVER 切到 MySQL/PG，本测试要断言的是
+// "驱动类型 → 方言"的映射，必须固定后端。
 func TestDialectOf(t *testing.T) {
-	db, cleanup := openTestDB(t)
-	if got := DialectOf(db); got != DialectSQLite {
+	sqliteDB, err := OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "dialect.db"), 1)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if got := DialectOf(sqliteDB); got != DialectSQLite {
 		t.Fatalf("DialectOf(sqlite) = %q, want %q", got, DialectSQLite)
 	}
-	cleanup()
+	sqliteDB.Close()
 
 	my, err := sql.Open("mysql", "u@tcp(127.0.0.1:1)/")
 	if err != nil {
@@ -72,9 +81,12 @@ func TestDBRebindForPostgres(t *testing.T) {
 	if wrapped.rebind(`SELECT * FROM t WHERE a = ? AND b = ?`) != `SELECT * FROM t WHERE a = $1 AND b = $2` {
 		t.Fatal("postgres rebind not applied")
 	}
-	// 非 PG 方言原样透传。
-	sqliteDB, cleanup := openTestDB(t)
-	defer cleanup()
+	// 非 PG 方言原样透传（显式 SQLite，见 TestDialectOf 的说明）。
+	sqliteDB, err := OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "dialect.db"), 1)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer sqliteDB.Close()
 	if wrapped := NewDB(sqliteDB); wrapped.rebind(`SELECT * FROM t WHERE a = ?`) != `SELECT * FROM t WHERE a = ?` {
 		t.Fatal("non-postgres dialect must not rewrite placeholders")
 	}
