@@ -22,6 +22,10 @@
 #
 # 注意：变量后紧跟中文时一律写成 ${var}——bash 3.2 在 UTF-8 locale 下会把
 # 全角字符并入变量名导致 unbound variable（已踩过坑，勿回退成 $var）。
+#
+# 兼容性：macOS（bash 3.2+ / BSD 工具）与 Linux（CentOS·Ubuntu·麒麟 V10
+# 等，GNU coreutils）均支持；stat 权限探测按 GNU→BSD 顺序兼容、mktemp 有
+# PID 降级、.env 容忍 CRLF。不依赖任何 GNU/BSD 专属行为。
 set -euo pipefail
 
 # 从任何位置调用都回到仓库根（BIN/ENV_FILE 的相对路径以仓库根为基准）。
@@ -39,6 +43,8 @@ load_env() {
     # 跳过空行与整行注释。不做行内剥离：值里出现 # 是合法内容
     #（如口令文件路径），行内注释的取舍留给用户写文件时自己控制。
     trimmed="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    # 剔除 CRLF（Windows 上编辑过的 .env 行尾会带 \r，会污染 DSN/路径等值）。
+    trimmed="${trimmed%$'\r'}"
     [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
     [[ "$trimmed" =~ ^(HUB_[A-Z0-9_]+)=(.*)$ ]] || continue
     key="${BASH_REMATCH[1]}"
@@ -71,12 +77,19 @@ ensure_db_password_file() {
     exit 1
   fi
   local mode
-  mode="$(stat -f %Lp "$pw" 2>/dev/null || stat -c %a "$pw" 2>/dev/null)"
+  # 权限探测要兼容 GNU 与 BSD 两套 stat：
+  #   Linux（麒麟/CentOS/Ubuntu，GNU coreutils）用 `stat -c %a`；
+  #   macOS（BSD）不认 -c，报错后回退 `stat -f %Lp`。
+  # 必须先试 GNU 再回退 BSD——反过来会在 Linux 上踩 GNU `-f` 是"文件系统
+  # 状态"语义的坑（%L 输出块大小之类且不报错，会把权限当垃圾值）。
+  # 若 stat 完全不可用（极简系统）mode 为空，走 chmod 幂等收紧 + 显示 <未知>。
+  mode="$(stat -c %a "$pw" 2>/dev/null)" || mode="$(stat -f %Lp "$pw" 2>/dev/null)"
   if [[ "$mode" != "600" ]]; then
+    local display="${mode:-<未知>}"
     if chmod 600 "$pw" 2>/dev/null; then
-      echo "run.sh: 已把口令文件权限收紧到 600（原 ${mode}）：${pw}" >&2
+      echo "run.sh: 已把口令文件权限收紧到 600（原 ${display}）：${pw}" >&2
     else
-      echo "run.sh: 警告：无法收紧口令文件权限（当前 ${mode}，期望 600；只读挂载/卷场景请部署侧处理）：${pw}" >&2
+      echo "run.sh: 警告：无法收紧口令文件权限（当前 ${display}，期望 600；只读挂载/卷场景请部署侧处理）：${pw}" >&2
     fi
   fi
   if [[ ! -s "$pw" ]]; then
@@ -124,7 +137,9 @@ cmd_init() {
     exit 1
   fi
   local tmp
-  tmp="$(mktemp "$dir/.db-pass.XXXXXX")"
+  # mktemp 模板写法 macOS（BSD）与 Linux（GNU）一致；极简系统无 mktemp 时
+  # 降级用 PID 命名（同目录临时文件，随后 mv 原子替换语义不变）。
+  tmp="$(mktemp "$dir/.db-pass.XXXXXX" 2>/dev/null)" || tmp="$dir/.db-pass.$$"
   printf '%s\n' "$p1" >"$tmp"
   chmod 600 "$tmp"
   mv "$tmp" "$pw"

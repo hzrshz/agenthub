@@ -88,6 +88,7 @@ cp .env.example .env      # 首次：复制模板（.env 已 git 忽略），按
   `serve` 启动前自动校验文件存在与权限（权限过宽自动收紧到 600）；管理员口令仍走交互式 `admin init/reset`。
 - HUB_DB_DSN/口令文件路径等未设置时保持默认（SQLite 单文件），模板里注释掉即是默认值。
 - `.env` 解析只接受 `HUB_` 前缀键、不做 eval/命令替换；`docker run --env-file .env` 可达同样效果（容器场景无需 run.sh）。
+- 兼容 **macOS 与 Linux（CentOS / Ubuntu / 麒麟 V10 等信创服务器）**：stat 权限探测按 GNU→BSD 顺序兼容、mktemp 有 PID 降级、.env 容忍 CRLF（详见 `scripts/run.sh` 头注释）。
 - 高级用法：`HUB_ENV_FILE=/path/to/env AGENTHUB_BIN=/usr/bin/agenthub ./scripts/run.sh serve`。
 
 ### 本地测试步骤（含局域网 AgentDock 配对：需要本地 HTTPS）
