@@ -28,7 +28,8 @@ COPY certs/zoneinfo.zip /zoneinfo.zip
 ENV TZ=Asia/Shanghai \
     ZONEINFO=/zoneinfo.zip
 
-# 数据目录（SQLite 单文件）以卷挂载持久化。
+# 数据目录以卷挂载持久化：SQLite 控制库文件 + 秘密文件（mysql/postgres 后端
+# 下控制库在远端服务器，/data 仅存秘密与口令文件，同样需要持久化）。
 # /data 必须在镜像内以 65534 属主预置：docker 自动创建的卷挂载点属主是
 # root:root 0755，非 root 进程首次启动写 SQLite 会 EACCES；空卷会继承
 # 镜像里该路径的属主与权限。COPY --chown 达成同样效果且不引入基础镜像。

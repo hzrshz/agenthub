@@ -18,7 +18,7 @@ AgentDock ──出站 WSS──▶ ┌─────────┐ ◀──M
   /v1/nodes/pair        │ AgentHub │      单一 /mcp，Bearer token 即身份
   /v1/nodes/connect     │  (Go)    │
                         └─────────┘
-                     SQLite 单文件，反代终结 TLS
+                     SQLite 默认 / MySQL 8.0+ / PG 14+，反代终结 TLS
 ```
 
 - 协议直接 import `github.com/uvwt/agentdock-protocol`（`PairRequest/PairResponse`、`Message` 封套、`node.hello/node.ready`、`tool.invoke/tool.result/tool.cancel`、heartbeat、`PublicURL`）。

@@ -307,11 +307,11 @@ HUB_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128 \
 
 ### 备份
 
-停机复制 `HUB_DATA_DIR/control.db` 单文件即可，不做在线备份。
+备份策略随后端不同：SQLite 停机复制 `HUB_DATA_DIR/control.db` 单文件；MySQL 用 `mysqldump`（可选 binlog）；PostgreSQL 用 `pg_dump`（详见 docs/LEVEL2-REVIEW-REMEDIATION.md §1.8）。
 
 ## Docker 部署
 
-镜像发布到 GHCR（不推 Docker Hub），多架构覆盖 amd64/arm64/loong64/riscv64，运行层为 distroless static（无 shell，非 root）：
+镜像发布到 GHCR（不推 Docker Hub），多架构覆盖 amd64/arm64/loong64/riscv64。运行层为 scratch（装配方言：静态二进制 + CA 证书 + 时区数据，非 root 65534，无 shell），不依赖任何外部基础镜像——多数据库驱动（MySQL/PostgreSQL）均为纯 Go 静态编译，镜像无需额外客户端库：
 
 ```bash
 # tag 推送后自动构建；拉取（把 OWNER 换成你的 GitHub 用户/组织名，小写）
@@ -334,6 +334,26 @@ docker run -d --name agenthub -p 127.0.0.1:8787:8787 \
   ghcr.io/<owner>/agenthub:latest serve
 ```
 
+服务器后端（MySQL/PostgreSQL）时，数据库**口令文件**必须挂载进容器（0600、属主 65534，与容器非 root 用户匹配），并加 TLS 参数符合等保要求：
+
+```bash
+# 口令文件由宿主机侧准备（0600）；容器内以卷挂载，指向 /data/secrets/db-pass
+install -m 600 <口令文件来源> /var/lib/agenthub/db-pass
+
+docker run -d --name agenthub -p 127.0.0.1:8787:8787 \
+  -v agenthub-data:/data \
+  -v /var/lib/agenthub/db-pass:/data/secrets/db-pass:ro \
+  -e HUB_PUBLIC_URL=https://hub.example.com \
+  -e HUB_DB_DRIVER=mysql \
+  -e HUB_DB_DSN="hub@tcp(db-host:3306)/agenthub?tls=preferred" \
+  -e HUB_DB_PASSWORD_FILE=/data/secrets/db-pass \
+  ghcr.io/<owner>/agenthub:latest serve
+```
+
+- 口令文件权限：宿主侧须 0600（`run.sh serve` 的自动收紧只对本地进程生效；卷里的文件权限由挂载侧保证，脚本仍会校验并告警）。
+- **TLS**：等保要求数据库链路加密——MySQL DSN 建议带 `tls=preferred`（或 `tls=require`），PostgreSQL DSN 建议带 `sslmode=require`；镜像已内置系统 CA，无需额外配置。
+- 服务编排（compose/K8s）里让数据库先于 agenthub 就绪（`depends_on` + healthcheck / initContainer），否则首次启动的 schema 初始化会因连不上库而失败（容器 `restart: unless-stopped` 可自动重试）。
+
 若反向代理也跑在容器里，让两者处于同一 Docker 网络用服务名互访即可，
 此时可以不发布端口（比发布到回环更严格）：
 
@@ -355,7 +375,7 @@ volumes:
   agenthub-data:
 ```
 
-本地构建镜像：`docker build -t agenthub .`（多阶段：node 构建前端 → golang 静态编译 → distroless 运行层）。
+本地构建镜像：先 `make release-linux`（产出 dist/ 与 certs/），再 `docker build -t agenthub .`（装配方言，非多阶段构建——二进制来自 dist/，见 Dockerfile 头注释）。
 
 ## 构建
 
