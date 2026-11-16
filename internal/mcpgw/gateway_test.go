@@ -331,7 +331,8 @@ func TestMCPDoesNotAdvertiseToolListChanged(t *testing.T) {
 }
 
 // 错误 token 拒绝且 401 带 WWW-Authenticate。
-func TestMCPAuthRejected(t *testing.T) {	env := newGatewayEnv(t)
+func TestMCPAuthRejected(t *testing.T) {
+	env := newGatewayEnv(t)
 	resp, err := http.Post(env.ts.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
 	if err != nil {
 		t.Fatalf("post mcp: %v", err)

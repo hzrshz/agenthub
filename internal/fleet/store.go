@@ -10,6 +10,8 @@ import (
 	"time"
 
 	protocol "github.com/uvwt/agentdock-protocol"
+
+	"github.com/uvwt/agenthub/internal/core"
 )
 
 // PublishedTool 是某用户命名空间内一个工具名的公开契约状态。
@@ -24,12 +26,33 @@ type PublishedTool struct {
 
 // Store 负责 fleet 公开契约的持久化（按 owner_user_id 分区）。
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	db      *core.DB
+	dialect core.Dialect
+	now     func() time.Time
 }
 
 func NewStore(db *sql.DB) *Store {
-	return &Store{db: db, now: time.Now}
+	return &Store{db: core.NewDB(db), dialect: core.DialectOf(db), now: time.Now}
+}
+
+// upsertPublishedContractSQL 按方言选择写入写法（详见 nodes 包同名列注释）。
+func upsertPublishedContractSQL(d core.Dialect) string {
+	if d == core.DialectMySQL {
+		return `INSERT INTO published_tool_contracts(
+			owner_user_id, tool_name, descriptor_json, source_node_id, source_version, updated_at
+		) VALUES(?, ?, ?, ?, ?, ?) AS new ON DUPLICATE KEY UPDATE
+			descriptor_json = new.descriptor_json,
+			source_node_id = new.source_node_id,
+			source_version = new.source_version,
+			updated_at = new.updated_at`
+	}
+	return `INSERT INTO published_tool_contracts(
+		owner_user_id, tool_name, descriptor_json, source_node_id, source_version, updated_at
+	) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(owner_user_id, tool_name) DO UPDATE SET
+		descriptor_json = excluded.descriptor_json,
+		source_node_id = excluded.source_node_id,
+		source_version = excluded.source_version,
+		updated_at = excluded.updated_at`
 }
 
 // List 返回用户命名空间内的全部公开契约。
@@ -163,13 +186,7 @@ func (s *Store) Save(ctx context.Context, ownerUserID string, tool PublishedTool
 		return fmt.Errorf("开始公开契约事务: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO published_tool_contracts(
-		owner_user_id, tool_name, descriptor_json, source_node_id, source_version, updated_at
-	) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(owner_user_id, tool_name) DO UPDATE SET
-		descriptor_json = excluded.descriptor_json,
-		source_node_id = excluded.source_node_id,
-		source_version = excluded.source_version,
-		updated_at = excluded.updated_at`,
+	if _, err := tx.ExecContext(ctx, upsertPublishedContractSQL(s.dialect),
 		ownerUserID, tool.Descriptor.Name, string(descriptorJSON), tool.SourceNodeID, tool.SourceVersion, now); err != nil {
 		return fmt.Errorf("保存公开契约 %s: %w", tool.Descriptor.Name, err)
 	}

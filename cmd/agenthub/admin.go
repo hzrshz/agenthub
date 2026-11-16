@@ -89,7 +89,8 @@ func adminCommand(ctx context.Context, cfg config.Config, sub string, args []str
 }
 
 func openAdminDB(ctx context.Context, cfg config.Config) (*sql.DB, error) {
-	db, err := core.OpenSQLite(ctx, cfg.ControlDBPath(), 2)
+	// 与 serve 同一条打开链路：默认 SQLite，配置了 HUB_DB_* 则走服务器后端。
+	db, err := core.OpenDB(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

@@ -69,12 +69,14 @@ type PairInput struct {
 
 // Store 是节点域的存储与业务入口。
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	db      *core.DB
+	dialect core.Dialect
+	now     func() time.Time
 }
 
 func NewStore(db *sql.DB) *Store {
-	return &Store{db: db, now: time.Now}
+	// core.DB 包装负责方言占位符重写（PG ?→$N），业务侧 SQL 保持 ? 写法。
+	return &Store{db: core.NewDB(db), dialect: core.DialectOf(db), now: time.Now}
 }
 
 // recordAudit 写一条审计事件（append-only）。
@@ -195,7 +197,7 @@ func (s *Store) Pair(ctx context.Context, input PairInput) (Node, error) {
 		now.Format(time.RFC3339Nano), pairID)
 	if err != nil {
 		// 写锁竞争：别人正在消费同一枚码。对调用方而言等价于"码已被用"。
-		if strings.Contains(strings.ToLower(err.Error()), "locked") {
+		if core.IsLocked(err) {
 			return Node{}, ErrPairingCodeInvalid
 		}
 		return Node{}, fmt.Errorf("消费配对码: %w", err)
@@ -209,13 +211,14 @@ func (s *Store) Pair(ctx context.Context, input PairInput) (Node, error) {
 	) VALUES(?, ?, ?, ?, 1, ?, ?, ?)`,
 		nodeID, ownerUserID, deviceID, name, core.HashToken(deviceToken),
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
-		if core.IsSQLiteConflict(err) || strings.Contains(strings.ToLower(err.Error()), "unique") {
+		// 唯一约束冲突：device_id / device_token_hash 已被占用，即设备已配对。
+		if core.IsConflict(err) {
 			return Node{}, ErrNodeExists
 		}
-		// 写锁竞争（SQLITE_BUSY）本质是"别人正在消费这个码"，
+		// 写锁竞争（SQLITE_BUSY / MySQL 锁等待与死锁）本质是"别人正在消费这个码"，
 		// 对调用方与"码已被用过"无差别，统一映射成 ErrPairingCodeInvalid，
 		// 不把底层数据库错误泄漏到 HTTP 响应里。
-		if strings.Contains(strings.ToLower(err.Error()), "locked") {
+		if core.IsLocked(err) {
 			return Node{}, ErrPairingCodeInvalid
 		}
 		return Node{}, fmt.Errorf("创建节点: %w", err)
@@ -454,13 +457,11 @@ func (s *Store) UpdateHello(ctx context.Context, nodeID string, hello protocol.H
 		strings.TrimSpace(hello.Arch), string(capabilities), strings.TrimSpace(hello.ToolContractHash), now, now, nodeID); err != nil {
 		return Node{}, fmt.Errorf("更新节点握手信息: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO tool_contracts(node_id, descriptors_json, updated_at)
-		VALUES(?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET descriptors_json = excluded.descriptors_json, updated_at = excluded.updated_at`,
+	if _, err := tx.ExecContext(ctx, upsertToolContractSQL(s.dialect),
 		nodeID, string(descriptors), now); err != nil {
 		return Node{}, fmt.Errorf("保存工具契约: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO bridge_capabilities(node_id, capabilities_json, updated_at)
-		VALUES(?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET capabilities_json = excluded.capabilities_json, updated_at = excluded.updated_at`,
+	if _, err := tx.ExecContext(ctx, upsertBridgeCapabilitySQL(s.dialect),
 		nodeID, string(bridgeCapabilities), now); err != nil {
 		return Node{}, fmt.Errorf("保存 Bridge 能力: %w", err)
 	}
@@ -534,6 +535,30 @@ func scanNode(scanner interface{ Scan(...any) error }) (Node, error) {
 	}
 	node.Enabled = enabled == 1
 	return node, nil
+}
+
+// upsertToolContractSQL / upsertBridgeCapabilitySQL 按方言选择写入写法：
+// SQLite/PG 用 ON CONFLICT ... excluded.；MySQL 用行别名 + ON DUPLICATE
+// KEY UPDATE（8.0.19+；VALUES() 在 8.0.20+ 已弃用，不引入弃用写法）。
+// 占位符统一保持 ?，PG 的重写由阶段 B 的 Rebind 在调用侧完成。
+func upsertToolContractSQL(d core.Dialect) string {
+	if d == core.DialectMySQL {
+		return `INSERT INTO tool_contracts(node_id, descriptors_json, updated_at)
+			VALUES(?, ?, ?) AS new
+			ON DUPLICATE KEY UPDATE descriptors_json = new.descriptors_json, updated_at = new.updated_at`
+	}
+	return `INSERT INTO tool_contracts(node_id, descriptors_json, updated_at)
+		VALUES(?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET descriptors_json = excluded.descriptors_json, updated_at = excluded.updated_at`
+}
+
+func upsertBridgeCapabilitySQL(d core.Dialect) string {
+	if d == core.DialectMySQL {
+		return `INSERT INTO bridge_capabilities(node_id, capabilities_json, updated_at)
+			VALUES(?, ?, ?) AS new
+			ON DUPLICATE KEY UPDATE capabilities_json = new.capabilities_json, updated_at = new.updated_at`
+	}
+	return `INSERT INTO bridge_capabilities(node_id, capabilities_json, updated_at)
+		VALUES(?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET capabilities_json = excluded.capabilities_json, updated_at = excluded.updated_at`
 }
 
 func normalizeCapabilities(values []string) []string {

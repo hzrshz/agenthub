@@ -31,6 +31,16 @@ build:
 test:
 	go test ./... -count=1
 
+# test-db: 在 HUB_TEST_DB_* 指向的真库上跑全部测试（CI 的 mysql/pg job 用；
+# 本地需先起目标库容器）。SQLite 行为由默认 go test 覆盖，这里只面向服务器后端。
+# 前置：HUB_TEST_DB_DRIVER=mysql|postgres、HUB_TEST_DB_DSN（不带口令）、
+#       HUB_TEST_DB_PASSWORD_FILE（口令文件，与生产 HUB_DB_PASSWORD_FILE 同规则）。
+test-db:
+	@test -n "$$HUB_TEST_DB_DRIVER" || (echo "test-db requires HUB_TEST_DB_DRIVER=mysql|postgres"; exit 1)
+	@test -n "$$HUB_TEST_DB_DSN" || (echo "test-db requires HUB_TEST_DB_DSN (without password)"; exit 1)
+	@test -n "$$HUB_TEST_DB_PASSWORD_FILE" || (echo "test-db requires HUB_TEST_DB_PASSWORD_FILE"; exit 1)
+	go test ./... -count=1
+
 # test-race: 并发热点（连接替换、inflight/rate map、fleet reconcileMu）的竞态检测。
 test-race:
 	go test ./... -race -count=1

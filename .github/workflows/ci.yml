@@ -1,5 +1,9 @@
 # 常规 CI：测试 + vet + 前端类型检查；额外做一次 loong64 编译冒烟，
 # 保证国产化目标不被日常提交破坏。
+#
+# 多后端守门：默认 job 跑 SQLite；test-mysql / test-postgres 用官方镜像
+# 真库跑同一套测试。方言差异（DDL、upsert、trigger、collation、占位符）
+# 只有真库能暴露——这两条 job 是"声明支持该后端"的证据。
 name: ci
 
 on:
@@ -109,3 +113,62 @@ jobs:
             echo "ERROR: embedded web assets are not served"; exit 1;
           }
           docker rm -f agenthub-smoke >/dev/null
+
+  # 真库守门：同一套测试跑在 MySQL 8.4 官方镜像上。
+  # 每个测试一个独立随机库（见 core.OpenTestDB），并行与隔离由测试基建保证。
+  test-mysql:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.11"
+          cache: true
+      - name: Test against MySQL
+        env:
+          HUB_TEST_DB_DRIVER: mysql
+          HUB_TEST_DB_DSN: root@tcp(127.0.0.1:3306)/
+          HUB_TEST_DB_PASSWORD_FILE: /tmp/mysql-test-password
+        run: |
+          printf 'root' > /tmp/mysql-test-password
+          chmod 600 /tmp/mysql-test-password
+          make test-db
+
+  # 真库守门：同一套测试跑在 PostgreSQL 16 官方镜像上。
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.11"
+          cache: true
+      - name: Test against PostgreSQL
+        env:
+          HUB_TEST_DB_DRIVER: postgres
+          HUB_TEST_DB_DSN: "host=127.0.0.1 port=5432 user=postgres dbname=postgres"
+          HUB_TEST_DB_PASSWORD_FILE: /tmp/postgres-test-password
+        run: |
+          printf 'postgres' > /tmp/postgres-test-password
+          chmod 600 /tmp/postgres-test-password
+          make test-db

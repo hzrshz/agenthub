@@ -331,13 +331,13 @@ func (h *Hub) readLoop(connection *nodeConnection) {
 				message.Error = &protocol.RemoteError{Code: "NODE_BAD_RESPONSE", Message: "节点返回了空错误"}
 			}
 			connection.resolve(message.RequestID, pendingResult{err: message.Error})
-case protocol.MessageNodeHeartbeat:
-		// 心跳落库用独立超时而非请求 ctx：连接生命周期独立于任何 HTTP 请求，
-		// 但库写也不能无限阻塞读循环——慢写不应拖垮心跳与后续帧处理。
-		touchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = h.store.Touch(touchCtx, connection.nodeID)
-		cancel()
-		_ = connection.write(protocol.Message{Type: protocol.MessageNodeHeartbeat})
+		case protocol.MessageNodeHeartbeat:
+			// 心跳落库用独立超时而非请求 ctx：连接生命周期独立于任何 HTTP 请求，
+			// 但库写也不能无限阻塞读循环——慢写不应拖垮心跳与后续帧处理。
+			touchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = h.store.Touch(touchCtx, connection.nodeID)
+			cancel()
+			_ = connection.write(protocol.Message{Type: protocol.MessageNodeHeartbeat})
 		}
 	}
 }

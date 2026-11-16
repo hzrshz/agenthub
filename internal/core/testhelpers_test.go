@@ -3,19 +3,17 @@ package core
 import (
 	"context"
 	"database/sql"
-	"path/filepath"
 	"testing"
 )
 
 func openTestDB(t *testing.T) (*sql.DB, func()) {
 	t.Helper()
 	ctx := context.Background()
-	db, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "test.db"), 2)
+	// OpenTestDB 默认 SQLite 临时文件；CI 真库 job 通过 HUB_TEST_DB_* 切换，
+	// 此处无需关心后端差异。
+	db, cleanup, err := OpenTestDB(ctx, t.TempDir())
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("open test db: %v", err)
 	}
-	if err := EnsureSchema(ctx, db); err != nil {
-		t.Fatalf("ensure schema: %v", err)
-	}
-	return db, func() { _ = db.Close() }
+	return db, cleanup
 }

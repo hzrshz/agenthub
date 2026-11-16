@@ -8,17 +8,19 @@ import (
 )
 
 // 全新库必须建到当前版本，且重复 Ensure 幂等。
+// 版本读取走方言机制（SQLite 的 user_version / MySQL 与 PG 的 schema_migrations），
+// 两个后端都在 CI 里各跑一遍，保证版本化机制本身没有方言偏差。
 func TestEnsureSchemaFreshDB(t *testing.T) {
 	db, closeDB := openTestDB(t)
 	defer closeDB()
 	ctx := context.Background()
 
-	var version int
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
-		t.Fatalf("read user_version: %v", err)
+	version, err := readSchemaVersion(ctx, db, DialectOf(db))
+	if err != nil {
+		t.Fatalf("read schema version: %v", err)
 	}
 	if version != CurrentSchemaVersion {
-		t.Fatalf("user_version = %d, want %d", version, CurrentSchemaVersion)
+		t.Fatalf("schema version = %d, want %d", version, CurrentSchemaVersion)
 	}
 	if err := EnsureSchema(ctx, db); err != nil {
 		t.Fatalf("second ensure should be idempotent: %v", err)
@@ -89,20 +91,22 @@ func TestUserCascadeDelete(t *testing.T) {
 }
 
 // 用户内 tool_name 唯一、跨用户可重名：多租户 fleet 分区的核心约束。
+// 直接命中裸库（不经 store），因此包一层 core.DB 做方言占位符重写（PG）。
 func TestPublishedContractUniquePerUser(t *testing.T) {
 	db, closeDB := openTestDB(t)
 	defer closeDB()
+	q := NewDB(db) // ? → $N（PG），SQLite/MySQL 原样
 	ctx := context.Background()
 
 	insertUser := func(id string) {
 		t.Helper()
-		if _, err := db.ExecContext(ctx, `INSERT INTO users(id, username, created_at, updated_at)
+		if _, err := q.ExecContext(ctx, `INSERT INTO users(id, username, created_at, updated_at)
 			VALUES (?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, id, id+"@example.com"); err != nil {
 			t.Fatalf("insert user: %v", err)
 		}
 	}
 	insertContract := func(owner, name string) error {
-		_, err := db.ExecContext(ctx, `INSERT INTO published_tool_contracts(owner_user_id, tool_name, descriptor_json, updated_at)
+		_, err := q.ExecContext(ctx, `INSERT INTO published_tool_contracts(owner_user_id, tool_name, descriptor_json, updated_at)
 			VALUES (?, ?, '{}', '2026-01-01T00:00:00Z')`, owner, name)
 		return err
 	}
@@ -121,12 +125,21 @@ func TestPublishedContractUniquePerUser(t *testing.T) {
 }
 
 // 未来版本号高于当前二进制时必须拒绝启动。
+// 版本落库按方言走：SQLite 用 PRAGMA，服务器方言直接写 schema_migrations。
 func TestEnsureSchemaRejectsNewerVersion(t *testing.T) {
 	db, closeDB := openTestDB(t)
 	defer closeDB()
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `PRAGMA user_version = 999`); err != nil {
-		t.Fatalf("bump version: %v", err)
+	switch DialectOf(db) {
+	case DialectSQLite:
+		if _, err := db.ExecContext(ctx, `PRAGMA user_version = 999`); err != nil {
+			t.Fatalf("bump version: %v", err)
+		}
+	default:
+		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, name, applied_at)
+			VALUES(999, 'future', '2026-01-01T00:00:00Z')`); err != nil {
+			t.Fatalf("bump version: %v", err)
+		}
 	}
 	if err := EnsureSchema(ctx, db); err == nil {
 		t.Fatal("newer schema version must be rejected")

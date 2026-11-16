@@ -59,12 +59,13 @@ const (
 
 // Store 是调用记录存储。
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	db      *core.DB
+	dialect core.Dialect
+	now     func() time.Time
 }
 
 func NewStore(db *sql.DB) *Store {
-	return &Store{db: db, now: time.Now}
+	return &Store{db: core.NewDB(db), dialect: core.DialectOf(db), now: time.Now}
 }
 
 // RecordInvoke 写入一条调用记录。失败只返回错误给调用方自行决策（记录失败不阻断调用本身）。
@@ -188,12 +189,27 @@ func (s *Store) Cleanup(ctx context.Context) (int64, error) {
 	removed, _ := result.RowsAffected()
 
 	// 条数上限裁剪：保留最新 InvokeLogMaxRows 条。
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM invoke_logs WHERE id IN (
-		SELECT id FROM invoke_logs ORDER BY occurred_at DESC LIMIT -1 OFFSET ?
-	)`, config.InvokeLogMaxRows); err != nil {
+	// SQLite 用 LIMIT -1 表示"不设上限只取 OFFSET 之后"（历史写法）；
+	// MySQL 语义等价用 BIGINT UNSIGNED 最大值，且 DELETE 不能直接引用
+	// 同表子查询（错误 1093），须再包一层派生表。
+	if _, err := s.db.ExecContext(ctx, trimInvokeLogsSQL(s.dialect), config.InvokeLogMaxRows); err != nil {
 		return removed, fmt.Errorf("裁剪调用记录条数: %w", err)
 	}
 	return removed, nil
+}
+
+// trimInvokeLogsSQL 返回按 dialect 选择的"保留最新 N 条之外的删除"语句。
+func trimInvokeLogsSQL(d core.Dialect) string {
+	if d == core.DialectMySQL {
+		return `DELETE FROM invoke_logs WHERE id IN (
+			SELECT id FROM (
+				SELECT id FROM invoke_logs ORDER BY occurred_at DESC LIMIT 18446744073709551615 OFFSET ?
+			) AS trim_tmp
+		)`
+	}
+	return `DELETE FROM invoke_logs WHERE id IN (
+		SELECT id FROM invoke_logs ORDER BY occurred_at DESC LIMIT -1 OFFSET ?
+	)`
 }
 
 // UserStats 汇总单用户近期调用量（管理页统计），JOIN users 显示用户名。

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -56,6 +57,9 @@ const (
 	MCPAuthFailureLimitPerMinute = 30
 	// MCPAuthFailureBlock 返回 429 前对该 IP 的封锁时长。
 	MCPAuthFailureBlock = 5 * time.Minute
+	// defaultDBMaxOpenConns 服务器后端（mysql/postgres）的默认连接池上限。
+	// sqlite 不适用（固定 2，见 Config.DBMaxOpenConns 注释）。
+	defaultDBMaxOpenConns = 10
 )
 
 // Config 是进程启动所需的全部外部配置。除 PublicURL 外都有可用默认值。
@@ -72,6 +76,19 @@ type Config struct {
 	// 安全边界：clientIP 只在这些网段的来源才采信 XFF，否则一律用 RemoteAddr。
 	// 空列表 = 不采信任何 XFF（默认，配合"hub 只监听回环"的部署形态最安全）。
 	TrustedProxyCIDRs []string
+
+	// DBDriver 控制库后端：sqlite（默认，单文件）/ mysql / postgres。
+	// 不设置时行为与历史版本完全一致（SQLite + HUB_DATA_DIR/control.db）。
+	DBDriver string
+	// DBDSN 仅 mysql/postgres 使用：不含口令的驱动原生 DSN
+	// （如 mysql: "user@tcp(host:3306)/dbname"；postgres: "host=... user=... dbname=..."）。
+	// 口令一律走 DBPasswordFile，禁止内嵌在 DSN 环境变量里——与"秘密不走环境变量"一致。
+	DBDSN string
+	// DBPasswordFile 仅 mysql/postgres 使用：数据库口令文件路径（0700，启动时读取）。
+	DBPasswordFile string
+	// DBMaxOpenConns 仅 mysql/postgres 使用：连接池上限。sqlite 固定 2，
+	// 与历史部署一致（单文件库并发写锁本来就是瓶颈，放开只会放大锁竞争）。
+	DBMaxOpenConns int
 }
 
 // Resolver 是把可信反代网段预解析成可快速比对的集合。
@@ -82,9 +99,20 @@ type Resolver struct {
 // Load 从环境变量读取配置并校验。
 func Load() (Config, error) {
 	cfg := Config{
-		DataDir:   envDefault("HUB_DATA_DIR", ""),
-		Listen:    envDefault("HUB_LISTEN", "127.0.0.1:8787"),
-		PublicURL: strings.TrimRight(strings.TrimSpace(os.Getenv("HUB_PUBLIC_URL")), "/"),
+		DataDir:        envDefault("HUB_DATA_DIR", ""),
+		Listen:         envDefault("HUB_LISTEN", "127.0.0.1:8787"),
+		PublicURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("HUB_PUBLIC_URL")), "/"),
+		DBDriver:       strings.ToLower(envDefault("HUB_DB_DRIVER", "sqlite")),
+		DBDSN:          strings.TrimSpace(os.Getenv("HUB_DB_DSN")),
+		DBPasswordFile: strings.TrimSpace(os.Getenv("HUB_DB_PASSWORD_FILE")),
+		DBMaxOpenConns: defaultDBMaxOpenConns,
+	}
+	if raw := strings.TrimSpace(os.Getenv("HUB_DB_MAX_OPEN_CONNS")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return cfg, fmt.Errorf("invalid HUB_DB_MAX_OPEN_CONNS %q: must be a positive integer", raw)
+		}
+		cfg.DBMaxOpenConns = n
 	}
 	if cfg.DataDir == "" {
 		home, err := os.UserHomeDir()
@@ -115,7 +143,57 @@ func (c Config) Validate() error {
 	if _, err := c.TrustedProxies(); err != nil {
 		return err
 	}
+	if err := c.validateDB(); err != nil {
+		return err
+	}
 	return ValidatePublicURL(c.PublicURL)
+}
+
+// validateDB 校验控制库后端配置。
+//
+// 安全边界：DBDSN 只承载地址/库名/用户，口令必须走 DBPasswordFile——
+// 把口令写进环境变量/配置等于把鉴别信息与新库的"明文不入配置"红线
+// 冲突，且 DSN 还会出现在进程环境与日志里。这里显式拒绝带口令形态的 DSN
+// （mysql 的 user:pass@… 与 URL 的 userinfo），防呆而不是靠文档提醒。
+func (c Config) validateDB() error {
+	switch c.DBDriver {
+	case "", "sqlite":
+		// 配了 mysql 专用项却不切驱动，是部署配置笔误：静默忽略会让
+		// 运维误以为已经连上 MySQL，实际还在用旧 SQLite 文件。
+		if c.DBDSN != "" || c.DBPasswordFile != "" {
+			return errors.New("HUB_DB_DSN / HUB_DB_PASSWORD_FILE are set but HUB_DB_DRIVER is not mysql/postgres; remove them or set HUB_DB_DRIVER")
+		}
+		return nil
+	case "mysql", "postgres":
+		if strings.TrimSpace(c.DBDSN) == "" {
+			return errors.New("HUB_DB_DSN is required when HUB_DB_DRIVER is mysql/postgres")
+		}
+		if strings.TrimSpace(c.DBPasswordFile) == "" {
+			return errors.New("HUB_DB_PASSWORD_FILE is required when HUB_DB_DRIVER is mysql/postgres: 口令必须走独立文件，禁止写入环境变量或配置")
+		}
+		if err := rejectPasswordInDSN(c.DBDriver, c.DBDSN); err != nil {
+			return err
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid HUB_DB_DRIVER %q: must be sqlite, mysql or postgres", c.DBDriver)
+	}
+}
+
+// rejectPasswordInDSN 拒绝任何带口令的 DSN 形态（详见 validateDB 的安全边界注释）。
+func rejectPasswordInDSN(driver, dsn string) error {
+	lower := strings.ToLower(dsn)
+	if strings.Contains(lower, "password=") || strings.Contains(lower, "://") {
+		return errors.New("HUB_DB_DSN must not contain a password or URL userinfo; use HUB_DB_PASSWORD_FILE")
+	}
+	if driver == "mysql" {
+		// mysql 原生 DSN 形如 [user[:pass]@][protocol(addr)]/db。
+		// 无口令形态 @ 之前只有用户名；出现冒号即夹带了口令段。
+		if before, _, ok := strings.Cut(dsn, "@"); ok && strings.Contains(before, ":") {
+			return errors.New("HUB_DB_DSN must not embed a password; use HUB_DB_PASSWORD_FILE")
+		}
+	}
+	return nil
 }
 
 // TrustedProxies 解析可信反代网段；非法网段在启动时直接失败，

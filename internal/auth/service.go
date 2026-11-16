@@ -72,12 +72,13 @@ func (e *RateLimitError) Error() string { return "too many attempts, retry later
 
 // Service 是账号体系的业务入口。
 type Service struct {
-	db  *sql.DB
-	now func() time.Time
+	db      *core.DB
+	dialect core.Dialect
+	now     func() time.Time
 }
 
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db, now: time.Now}
+	return &Service{db: core.NewDB(db), dialect: core.DialectOf(db), now: time.Now}
 }
 
 // ---- 口令 ----
@@ -612,9 +613,7 @@ func (s *Service) IssueMCPToken(ctx context.Context, userID string) (string, err
 		return "", err
 	}
 	now := s.now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO user_mcp_tokens(id, user_id, token_hash, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?)
-		ON CONFLICT(user_id) DO UPDATE SET token_hash = excluded.token_hash, updated_at = excluded.updated_at`,
+	if _, err := s.db.ExecContext(ctx, upsertMCPTokenSQL(s.dialect),
 		"mct_"+core.HashToken(raw)[:16], userID, core.HashToken(raw), now, now); err != nil {
 		return "", fmt.Errorf("issue mcp token: %w", err)
 	}
@@ -700,10 +699,7 @@ func (s *Service) recordLoginFailure(ctx context.Context, accountKey, ipKey stri
 		if delay > longest {
 			longest = delay
 		}
-		_, err = s.db.ExecContext(ctx, `INSERT INTO login_throttles(key_type, key_value, failures, blocked_until, last_failed_at)
-			VALUES(?, ?, ?, ?, ?)
-			ON CONFLICT(key_type, key_value) DO UPDATE SET failures = excluded.failures,
-			blocked_until = excluded.blocked_until, last_failed_at = excluded.last_failed_at`,
+		_, err = s.db.ExecContext(ctx, upsertLoginThrottleSQL(s.dialect),
 			key[0], key[1], failures, now.Add(delay).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 		if err != nil {
 			continue
@@ -824,6 +820,35 @@ func mustID() string {
 func CSRFTokenFor(sessionID string) string {
 	sum := sha256.Sum256([]byte("csrf:" + sessionID))
 	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// ---- 方言 UPSERT 变体 ----
+
+// upsertMCPTokenSQL / upsertLoginThrottleSQL 按方言选择写入写法：
+// SQLite/PG 用 ON CONFLICT ... excluded.；MySQL 用行别名 + ON DUPLICATE
+// KEY UPDATE（8.0.19+）。占位符统一保持 ?，PG 的重写由调用侧 Rebind 完成。
+func upsertMCPTokenSQL(d core.Dialect) string {
+	if d == core.DialectMySQL {
+		return `INSERT INTO user_mcp_tokens(id, user_id, token_hash, created_at, updated_at)
+			VALUES(?, ?, ?, ?, ?) AS new
+			ON DUPLICATE KEY UPDATE token_hash = new.token_hash, updated_at = new.updated_at`
+	}
+	return `INSERT INTO user_mcp_tokens(id, user_id, token_hash, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET token_hash = excluded.token_hash, updated_at = excluded.updated_at`
+}
+
+func upsertLoginThrottleSQL(d core.Dialect) string {
+	if d == core.DialectMySQL {
+		return `INSERT INTO login_throttles(key_type, key_value, failures, blocked_until, last_failed_at)
+			VALUES(?, ?, ?, ?, ?) AS new
+			ON DUPLICATE KEY UPDATE failures = new.failures,
+			blocked_until = new.blocked_until, last_failed_at = new.last_failed_at`
+	}
+	return `INSERT INTO login_throttles(key_type, key_value, failures, blocked_until, last_failed_at)
+		VALUES(?, ?, ?, ?, ?)
+		ON CONFLICT(key_type, key_value) DO UPDATE SET failures = excluded.failures,
+		blocked_until = excluded.blocked_until, last_failed_at = excluded.last_failed_at`
 }
 
 // ---- 小工具 ----

@@ -116,7 +116,9 @@ func serve(ctx context.Context, cfg config.Config) error {
 }
 
 func openDB(ctx context.Context, cfg config.Config) (*sql.DB, error) {
-	db, err := core.OpenSQLite(ctx, cfg.ControlDBPath(), 2)
+	// OpenDB 按 HUB_DB_* 配置打开后端：默认 SQLite 单文件（历史行为），
+	// 也可选 MySQL 8.0 协议兼容库 / PostgreSQL（阶段 B）。
+	db, err := core.OpenDB(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
