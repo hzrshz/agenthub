@@ -72,6 +72,24 @@ HUB_DATA_DIR=/var/lib/agenthub HUB_PUBLIC_URL=https://hub.example.com \
 
 因此"先用 IP 测试、之后迁移到 HTTPS 域名"完全支持：改环境变量重启后，Web/平台侧立即用新地址；**已配对的节点仍按旧地址连接**（继续工作，只是走旧地址）。若希望节点也切到新域名，删掉节点重新配对即可（Device Token 随删除吊销）。
 
+### 统一配置管理：.env + scripts/run.sh
+
+嫌命令行写一长串环境变量麻烦？所有可配置项都收进 `.env` 统一管理，由 `scripts/run.sh` 注入启动：
+
+```bash
+cp .env.example .env      # 首次：复制模板（.env 已 git 忽略），按需修改
+./scripts/run.sh init     # mysql/postgres 后端：生成数据库口令文件（交互式、不回显、0600）
+./scripts/run.sh serve    # 注入 .env 后启动（等价 export 后执行 ./agenthub serve）
+./scripts/run.sh admin init
+```
+
+- `.env` 只放**非秘密**配置（见模板内安全约定）：数据库、管理员口令一律不进 `.env`——
+  数据库口令由 `run.sh init` 写入 `HUB_DB_PASSWORD_FILE` 指向的独立文件（目录 0700/文件 0600），
+  `serve` 启动前自动校验文件存在与权限（权限过宽自动收紧到 600）；管理员口令仍走交互式 `admin init/reset`。
+- HUB_DB_DSN/口令文件路径等未设置时保持默认（SQLite 单文件），模板里注释掉即是默认值。
+- `.env` 解析只接受 `HUB_` 前缀键、不做 eval/命令替换；`docker run --env-file .env` 可达同样效果（容器场景无需 run.sh）。
+- 高级用法：`HUB_ENV_FILE=/path/to/env AGENTHUB_BIN=/usr/bin/agenthub ./scripts/run.sh serve`。
+
 ### 本地测试步骤（含局域网 AgentDock 配对：需要本地 HTTPS）
 
 **先说一个关键限制**（源码确认，配对报"公网 NexusDock endpoint 必须使用 HTTPS"即此原因）：AgentDock 侧对配对 endpoint 的校验只放行三种形态——

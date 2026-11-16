@@ -25,3 +25,5 @@ docs/
 /agenthub-linux-*
 /agenthub-darwin-*
 /agenthub-windows-*
+# 真实环境变量配置不进构建上下文（.env.example 除外，它不含任何真实值）
+.env
