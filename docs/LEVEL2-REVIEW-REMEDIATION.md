@@ -92,7 +92,7 @@
 | 1.3a/b/c 安全审计 | 登录成败/改密/管理操作/节点操作全覆盖；字段含时间/用户/动作/对象/结果/来源 IP；append-only；不落 arguments/result | auth/service.go:795-807、nodes/store.go:85-104、core/schema.go |
 | 1.4a/d/e 最小安装/数据有效性/漏洞修补 | scratch 镜像+非 root；输入统一 decodeJSON 1MB 上限+参数化 SQL+PairInput 字段校验+schema 注入防御+panic 防护；go1.26.10（2026-11 修复 GO-2026-6809）依赖与标准库漏洞已清零（govulncheck 门禁） | Dockerfile、httpx/server.go:297-304、mcpgw/gateway.go:187-275 |
 | 1.6/1.7 完整性与保密性 | 传输由反代 TLS 终结（部署契约）；应用层不落任何明文秘密；敏感数据（哈希）存储；库文件权限 0600/0700 | README、core/id.go、0e136a9 |
-| 1.8 数据备份恢复 | 单文件 SQLite 控制库，数据目录卷挂载（部署侧需补演练记录，见 §四） | Dockerfile |
+| 1.8 数据备份恢复 | SQLite：数据目录卷挂载+停机拷贝单文件；MySQL：mysqldump/binlog；PostgreSQL：pg_dump。部署侧需补备份演练记录（见 §四） | Dockerfile、README、internal/core/db.go |
 | 1.9 剩余信息保护 | 秘密只存哈希、明文只出现一次；日志/审计无明文 Token/口令；节点 DeviceToken 用 `json:"-"` 屏蔽序列化 | core/id.go、nodes/store.go:51-54 |
 | 3 红线 | 口令哈希（argon2id）、复杂度、默认口令、注入、越权、明文传输、默认鉴权——全部有对应防线；本次未发现任一红线级实现缺陷 | 见上表 |
 | 开发管理 2 | admin init/reset 口令走本地交互（terminal 不回显），无环境变量/参数形态 | cmd/agenthub/admin.go:20-21 |

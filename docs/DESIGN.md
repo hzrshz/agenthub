@@ -68,7 +68,13 @@ AgentDock ──出站 WSS──▶ ┌─────────┐ ◀──M
 
 禁用用户 = 立即踢掉该用户全部节点 WS + MCP token 即刻 401 + 配对码作废。管理员看统计与元数据流水，不看用户节点明细和调用内容。
 
-## 5. 数据模型（SQLite，WAL，单文件）
+## 5. 数据模型（多后端：SQLite 默认 / MySQL 8.0+ / PostgreSQL 14+）
+
+> 版本化：SQLite 用 `PRAGMA user_version`（历史契约）；MySQL/PG 用 `schema_migrations`
+> 表。三端建表 DDL 各有一份（`internal/core/schema.go`），同一套测试在三端跑防方言漂移；
+> 哈希列与用户名在 MySQL 下强制 `utf8mb4_bin` 大小写敏感。hub 不提供 SQLite → 服务器
+> 后端的迁移工具，存量与新增部署共存。SQLite 实际同步模式是 DELETE + FULL（可靠性
+> 优先，非 WAL，见 PLAN.md）。
 
 - `users`（邮箱形态用户名、密码哈希、must_change_password、status）
 - `user_sessions`（Web 会话，存哈希，绝对过期）
@@ -81,7 +87,7 @@ AgentDock ──出站 WSS──▶ ┌─────────┐ ◀──M
 - `invoke_logs`（仅元数据：时间/用户/节点/工具/成败/耗时/错误码，30 天滚动 + 条数上限）
 - `login_throttles`（账号+IP 限流，同时用于 `/v1/nodes/pair` 的按 IP 配对码爆破防护：10 次/分钟，连续失败递增延迟）
 
-备份策略：停机复制 SQLite 单文件，不做在线备份。
+备份策略（随后端）：SQLite 停机复制单文件；MySQL `mysqldump` + 可选 binlog；PostgreSQL `pg_dump`。部署侧重灾/演练记录见 LEVEL2-REVIEW-REMEDIATION.md §1.8。
 
 ## 6. 安全模型
 

@@ -7,10 +7,25 @@ AgentDock ──出站 WSS──▶ ┌─────────┐ ◀──M
   /v1/nodes/pair        │ AgentHub │      单一 /mcp，Bearer token 即身份
   /v1/nodes/connect     │  (Go)    │
                         └─────────┘
-                     SQLite 单文件，反代终结 TLS
+                     控制库：SQLite（默认）/ MySQL 8.0+ / PostgreSQL 14+，反代终结 TLS
 ```
 
 设计规格：[docs/DESIGN.md](docs/DESIGN.md)（全部运行时语义与安全配额的定义）。实施计划：[docs/PLAN.md](docs/PLAN.md)。
+
+### 控制库多后端
+
+默认后端是 SQLite 单文件（`$HUB_DATA_DIR/control.db`，零配置，行为与历史版本一致）。需要服务器数据库时通过 `HUB_DB_DRIVER` 切换：
+
+| 后端 | 兼容面 | 验证方式 |
+|---|---|---|
+| `sqlite`（默认） | 单文件，`PRAGMA user_version` 版本化 | 全部测试默认跑这个后端 |
+| `mysql` | MySQL 8.0.19+ 协议（含 OceanBase 等兼容库） | CI `test-mysql` job：官方 `mysql:8.4` 镜像跑同一套测试 |
+| `postgres` | PostgreSQL 14+ 协议（含 GaussDB/金仓等兼容库） | CI `test-postgres` job：官方 `postgres:16` 镜像跑同一套测试 |
+
+- 表结构/约束/审计 append-only trigger 按方言各有一份 DDL（`internal/core/schema.go`），三端行为由同一套测试锁定；哈希列与用户名在 MySQL 下强制 `utf8mb4_bin` 大小写敏感语义。
+- SQLite → 服务器后端**不做数据迁移工具**：存量部署继续跑 SQLite，新部署选新后端，两者可长期共存。
+- 服务器后端的库/用户由运维创建；hub 只建表与做版本化迁移（`schema_migrations` 表）。
+- 备份策略随后端不同：SQLite 停机拷贝单文件；MySQL 用 `mysqldump`/binlog；PostgreSQL 用 `pg_dump`（见 docs/LEVEL2-REVIEW-REMEDIATION.md §1.8）。
 
 ## 核心概念
 
@@ -37,9 +52,13 @@ HUB_DATA_DIR=/var/lib/agenthub HUB_PUBLIC_URL=https://hub.example.com \
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `HUB_PUBLIC_URL` | 是 | hub 对外访问的地址。反代子路径部署时可带**一段** base path（如 `https://hub.example.com/app`）。**生产必须 `https://`；测试允许 `http://localhost` 或 `http://<局域网IP>`**，公网 http 域名会被拒绝 |
-| `HUB_DATA_DIR` | 否 | 数据目录（SQLite 单文件），默认 `~/.agenthub`（容器内 `/data`） |
+| `HUB_DATA_DIR` | 否 | 数据目录（SQLite 控制库文件与秘密文件的根目录；mysql/postgres 后端下仅存秘密），默认 `~/.agenthub`（容器内 `/data`） |
 | `HUB_LISTEN` | 否 | 监听地址，默认 `127.0.0.1:8787`（容器内 `0.0.0.0:8787`） |
 | `HUB_TRUSTED_PROXY_CIDRS` | 否 | 可信反代网段（逗号分隔的 CIDR），**用了反向代理就应设置**。只有请求来自这些网段时 hub 才采信 `X-Forwarded-For` / `X-Forwarded-Proto`，用于按 IP 限流与 HSTS 判定；未设置则一律不采信（客户端可伪造这些头绕过限流）。宿主机反代填 `127.0.0.1/32,::1/128`，compose 网段按实际网段填 |
+| `HUB_DB_DRIVER` | 否 | 控制库后端：`sqlite`（默认，单文件）/ `mysql`（8.0.19+ 协议兼容，含 OceanBase 等）/ `postgres`（14+ 协议兼容，含 GaussDB/金仓等）。不设置 = SQLite，行为与历史版本完全一致 |
+| `HUB_DB_DSN` | 否* | 仅 mysql/postgres：**不含口令**的连接串。mysql 例：`hub@tcp(127.0.0.1:3306)/agenthub`；postgres 例：`host=127.0.0.1 port=5432 user=hub dbname=agenthub`。DSN 里的库须已由运维建好。*驱动为 mysql/postgres 时必填 |
+| `HUB_DB_PASSWORD_FILE` | 否* | 仅 mysql/postgres：数据库口令文件（建议 0700）。**口令必须走文件，禁止内嵌进 DSN 环境变量**——与"秘密不走环境变量"的等保口径一致，DSN 里出现口令形态会被启动校验直接拒绝。*驱动为 mysql/postgres 时必填 |
+| `HUB_DB_MAX_OPEN_CONNS` | 否 | 仅 mysql/postgres：连接池上限，默认 10（SQLite 固定 2，不受此配置影响） |
 
 ### HUB_PUBLIC_URL 的生效范围与修改
 

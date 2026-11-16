@@ -7,6 +7,7 @@ AgentHub 是多用户 AgentDock 汇聚网关：用户的 AgentDock 通过 Device
 ## 代码原则
 
 - 修改前先理解现有目录、数据模型、接口契约、错误处理和测试方式。
+- 控制库多后端：SQLite 默认（单文件，行为冻结）+ MySQL 8.0.19+/PostgreSQL 14+ 可选（含协议兼容库）。方言差异收敛在 `internal/core`（dialect.go/dbwrap.go/schema.go）：业务 SQL 统一写 `?` 占位符（PG 由 core.DB 包装自动重写为 `$N`），upsert/分页等不通用语按 dialect 出变体；三端行为由同一套测试锁定，CI 有官方镜像真库 job（改 schema 必须三端验证）。
 - 主流程保持连贯，优先具体类型和清楚的数据流；不要为形式上的分层提前增加 interface、helper 或通用抽象。
 - 动态 JSON 只停留在 HTTP/MCP 边界，进入核心流程后尽快转成明确结构。
 - 错误必须显式返回并包含定位上下文，不吞错，不只记录日志后继续。
